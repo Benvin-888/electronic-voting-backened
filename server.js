@@ -22,6 +22,11 @@ const authRoutes = require('./routes/authRoutes');
 
 // Initialize express
 const app = express();
+
+// Enable trust proxy - THIS IS THE KEY FIX
+// This tells Express to trust the X-Forwarded-For header
+app.set('trust proxy', 1); // Trust first proxy
+
 const server = http.createServer(app);
 const io = socketIo(server, {
   cors: {
@@ -36,13 +41,20 @@ connectDB();
 // Security middleware
 app.use(helmet());
 app.use(cors());
-//app.use(xss());
-//app.use(mongoSanitize());
+// app.use(xss());
+// app.use(mongoSanitize());
 
-// Rate limiting
+// Rate limiting - Updated configuration
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100 // limit each IP to 100 requests per windowMs
+  max: 100, // limit each IP to 100 requests per windowMs
+  standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
+  legacyHeaders: false, // Disable the `X-RateLimit-*` headers
+  // Optional: You can customize the key generator to use the forwarded IP
+  keyGenerator: (req) => {
+    // This will use the X-Forwarded-For header if trust proxy is enabled
+    return req.ip || req.connection.remoteAddress;
+  }
 });
 app.use('/api', limiter);
 
@@ -93,7 +105,7 @@ io.on('connection', (socket) => {
 // Start server
 const PORT = config.port;
 server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT} in ${process.env.NODE_ENV} mode`);
+  console.log(`Server running on port ${PORT} in ${process.env.NODE_ENV || 'development'} mode`);
 });
 
 // Handle unhandled promise rejections
