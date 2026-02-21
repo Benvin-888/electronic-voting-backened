@@ -22,43 +22,10 @@ const authRoutes = require('./routes/authRoutes');
 
 // Initialize express
 const app = express();
-
-// Trust the first proxy (Render / Heroku / Nginx)
-app.set('trust proxy', 1);
-
-// Rate limiting - must be BEFORE body parsers
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // limit each IP to 100 requests per window
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (req) => {
-    // Handles IPv4 and IPv6 correctly
-    return req.ip || req.headers['x-forwarded-for'] || req.connection.remoteAddress || 'unknown';
-  }
-});
-app.use('/api', limiter);
-
-// Security middleware
-app.use(helmet());
-app.use(cors());
-app.use(xss());
-app.use(mongoSanitize());
-
-// Body parser
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-
-// HTTP & Socket.io setup
 const server = http.createServer(app);
 const io = socketIo(server, {
   cors: {
-    origin: [
-      'http://127.0.0.1:5500',
-      'http://localhost:5500',
-      'http://localhost:3000',
-      'https://user-voting-site-2026-ke.web.app'
-    ],
+    origin: ['http://127.0.0.1:5500', 'http://localhost:5500', 'http://localhost:3000','https://user-voting-site-2026-ke.web.app'],
     methods: ["GET", "POST", "PUT", "DELETE"]
   }
 });
@@ -66,7 +33,24 @@ const io = socketIo(server, {
 // Connect to MongoDB
 connectDB();
 
-// Make io accessible to routers
+// Security middleware
+app.use(helmet());
+app.use(cors());
+//app.use(xss());
+//app.use(mongoSanitize());
+
+// Rate limiting
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100 // limit each IP to 100 requests per windowMs
+});
+app.use('/api', limiter);
+
+// Body parser
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// Make io accessible to our router
 app.use((req, res, next) => {
   req.io = io;
   next();
@@ -80,7 +64,7 @@ app.use('/api/v1/voting', votingRoutes);
 app.use('/api/v1/results', resultsRoutes);
 app.use('/api/v1/admin', adminRoutes);
 
-// Health check
+// Health check endpoint
 app.get('/health', (req, res) => {
   res.status(200).json({
     success: true,
@@ -107,13 +91,14 @@ io.on('connection', (socket) => {
 });
 
 // Start server
-const PORT = config.port || 5001;
+const PORT = config.port;
 server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT} in ${process.env.NODE_ENV || 'development'} mode`);
+  console.log(`Server running on port ${PORT} in ${process.env.NODE_ENV} mode`);
 });
 
 // Handle unhandled promise rejections
 process.on('unhandledRejection', (err, promise) => {
   console.log(`Error: ${err.message}`);
+  // Close server & exit process
   server.close(() => process.exit(1));
 });
