@@ -1,31 +1,34 @@
-const nodemailer = require('nodemailer');
+const SibApiV3Sdk = require('sib-api-v3-sdk');
 const config = require('../config');
 
-const transporter = nodemailer.createTransport({
-  host: config.email.host,
-  port: config.email.port,
-  secure: config.email.port === 465, // true for 465, false for other ports
-  auth: {
-    user: config.email.user,
-    pass: config.email.pass
-  },
-  tls: {
-    // Explicitly specify TLS version
-    minVersion: 'TLSv1.2',
-    maxVersion: 'TLSv1.3',
-    rejectUnauthorized: false // For testing only
-  },
-  // Alternative SSL settings
-  requireTLS: true,
-  debug: true // Enable debugging
-});
+// Initialize Brevo API instance
+let defaultClient = SibApiV3Sdk.ApiClient.instance;
+
+// Configure API key authorization
+let apiKey = defaultClient.authentications['api-key'];
+apiKey.apiKey = config.brevo.apiKey;
+
+// Create API instance
+let apiInstance = new SibApiV3Sdk.TransactionalEmailsApi();
 
 const sendRegistrationEmail = async (voter, votingNumber) => {
-  const mailOptions = {
-    from: config.email.from,
-    to: voter.email,
-    subject: 'Voter Registration Confirmation - Kirinyaga County Elections',
-    html: `
+  try {
+    let sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
+    
+    // Using your configured sender
+    sendSmtpEmail.sender = {
+      email: config.brevo.fromEmail,
+      name: config.brevo.fromName
+    };
+    
+    sendSmtpEmail.to = [{
+      email: voter.email,
+      name: voter.fullName
+    }];
+    
+    sendSmtpEmail.subject = 'Voter Registration Confirmation - Kirinyaga County Elections';
+    
+    sendSmtpEmail.htmlContent = `
       <!DOCTYPE html>
       <html>
         <head>
@@ -98,25 +101,38 @@ const sendRegistrationEmail = async (voter, votingNumber) => {
           </div>
         </body>
       </html>
-    `
-  };
+    `;
 
-  try {
-    await transporter.sendMail(mailOptions);
-    console.log(`Registration email sent to ${voter.email}`);
+    const data = await apiInstance.sendTransacEmail(sendSmtpEmail);
+    console.log(`✅ Registration email sent to ${voter.email}. Message ID: ${data.messageId}`);
     return true;
   } catch (error) {
-    console.error('Error sending registration email:', error);
+    console.error('❌ Error sending registration email via Brevo:', error.message);
+    if (error.response && error.response.text) {
+      console.error('Brevo API Error Details:', error.response.text);
+    }
     return false;
   }
 };
 
 const sendVoteConfirmationEmail = async (voter) => {
-  const mailOptions = {
-    from: config.email.from,
-    to: voter.email,
-    subject: 'Vote Confirmation - Kirinyaga County Elections',
-    html: `
+  try {
+    let sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
+    
+    // Using your configured sender
+    sendSmtpEmail.sender = {
+      email: config.brevo.fromEmail,
+      name: config.brevo.fromName
+    };
+    
+    sendSmtpEmail.to = [{
+      email: voter.email,
+      name: voter.fullName
+    }];
+    
+    sendSmtpEmail.subject = 'Vote Confirmation - Kirinyaga County Elections';
+    
+    sendSmtpEmail.htmlContent = `
       <!DOCTYPE html>
       <html>
         <head>
@@ -170,21 +186,21 @@ const sendVoteConfirmationEmail = async (voter) => {
           </div>
         </body>
       </html>
-    `
-  };
+    `;
 
-  try {
-    await transporter.sendMail(mailOptions);
-    console.log(`Vote confirmation email sent to ${voter.email}`);
+    const data = await apiInstance.sendTransacEmail(sendSmtpEmail);
+    console.log(`✅ Vote confirmation email sent to ${voter.email}. Message ID: ${data.messageId}`);
     return true;
   } catch (error) {
-    console.error('Error sending vote confirmation email:', error);
+    console.error('❌ Error sending vote confirmation email via Brevo:', error.message);
+    if (error.response && error.response.text) {
+      console.error('Brevo API Error Details:', error.response.text);
+    }
     return false;
   }
 };
 
 const sendPortalNotification = async (voters, notificationType) => {
-  // Batch send portal opening/closing notifications
   const subject = notificationType === 'open' 
     ? 'Voting Portal Now Open - Kirinyaga County Elections'
     : 'Voting Portal Now Closed - Kirinyaga County Elections';
@@ -193,9 +209,62 @@ const sendPortalNotification = async (voters, notificationType) => {
     ? 'The voting portal is now open. You can now cast your vote using your voting number.'
     : 'The voting portal is now closed. Thank you for participating in the elections.';
 
-  // In production, implement batch email sending or use email service
-  console.log(`Would send ${notificationType} notification to ${voters.length} voters`);
-  return true;
+  let successCount = 0;
+  let failCount = 0;
+
+  for (const voter of voters) {
+    try {
+      let sendSmtpEmail = new SibApiV3Sdk.SendSmtpEmail();
+      
+      // Using your configured sender
+      sendSmtpEmail.sender = {
+        email: config.brevo.fromEmail,
+        name: config.brevo.fromName
+      };
+      
+      sendSmtpEmail.to = [{
+        email: voter.email,
+        name: voter.fullName
+      }];
+      
+      sendSmtpEmail.subject = subject;
+      
+      sendSmtpEmail.htmlContent = `
+        <!DOCTYPE html>
+        <html>
+          <head>
+            <style>
+              body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+              .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+            </style>
+          </head>
+          <body>
+            <div class="container">
+              <h2>Dear ${voter.fullName},</h2>
+              <p>${message}</p>
+              <p>Visit the voting portal at: <a href="https://user-voting-site-2026-ke.web.app">https://user-voting-site-2026-ke.web.app</a></p>
+              <p>Thank you for participating in the Kirinyaga County elections.</p>
+              <hr>
+              <p style="font-size: 12px; color: #666;">This is an automated message from Kirinyaga County Election Commission.</p>
+            </div>
+          </body>
+        </html>
+      `;
+
+      await apiInstance.sendTransacEmail(sendSmtpEmail);
+      successCount++;
+      console.log(`✅ Portal notification sent to ${voter.email}`);
+      
+      // Add a small delay to avoid rate limiting
+      await new Promise(resolve => setTimeout(resolve, 200));
+    } catch (error) {
+      console.error(`❌ Failed to send to ${voter.email}:`, error.message);
+      failCount++;
+    }
+  }
+
+  console.log(`📊 Portal notifications summary: ${successCount} successful, ${failCount} failed`);
+  return { successCount, failCount };
 };
 
 module.exports = {

@@ -6,13 +6,15 @@ module.exports = {
   mongodbUri: process.env.MONGODB_URI,
   jwtSecret: process.env.JWT_SECRET,
   jwtExpire: process.env.JWT_EXPIRE,
-  email: {
-    host: process.env.EMAIL_HOST,
-    port: process.env.EMAIL_PORT,
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
-    from: process.env.EMAIL_FROM
+  
+  // Brevo email configuration
+  brevo: {
+    apiKey: process.env.BREVO_API_KEY,
+    fromEmail: process.env.EMAIL_FROM,
+    fromName: process.env.EMAIL_FROM_NAME
   },
+  
+  // SMS configuration
   sms: {
     apiKey: process.env.AFRICASTALKING_API_KEY,
     username: process.env.AFRICASTALKING_USERNAME,
