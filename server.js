@@ -38,7 +38,7 @@ app.use(helmet());
 app.use(cors());
 //app.use(xss());
 //app.use(mongoSanitize());
-
+app.set('trust proxy', 1); // trust first proxy
 // Rate limiting
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes

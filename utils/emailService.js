@@ -75,7 +75,7 @@ const sendRegistrationEmail = async (voter, votingNumber) => {
                 <ol>
                   <li><strong>Keep your voting number confidential</strong> - Do not share it with anyone</li>
                   <li>On election day, visit the voting portal</li>
-                  <p><em>Voting Portal URL: <a href="https://user-voting-site-2026-ke.web.app" target="_blank">https://user-voting-site-2026-ke.web.app</a></em></p>
+                  <p><em>Voting Portal URL: <a href="https://user-voting-site-2026-ke.web.app/Voting.html" target="_blank">https://user-voting-site-2026-ke.web.app/Voting.html</a></em></p>
                   <li>Log in using your voting number</li>
                   <li>Follow the on-screen instructions to cast your vote</li>
                   <li>Voting portal will be open during specified hours only</li>
@@ -165,7 +165,6 @@ const sendVoteConfirmationEmail = async (voter) => {
               <div class="success-icon">✓</div>
               <h2>Thank You for Voting, ${voter.fullName}!</h2>
               <p>Your vote has been successfully recorded in the Kirinyaga County elections.</p>
-              
               <p><strong>Voting Details:</strong></p>
               <ul>
                 <li>Time of Vote: ${new Date().toLocaleString()}</li>
@@ -242,7 +241,7 @@ const sendPortalNotification = async (voters, notificationType) => {
             <div class="container">
               <h2>Dear ${voter.fullName},</h2>
               <p>${message}</p>
-              <p>Visit the voting portal at: <a href="https://user-voting-site-2026-ke.web.app">https://user-voting-site-2026-ke.web.app</a></p>
+              <p>Visit the voting portal at: <a href="https://user-voting-site-2026-ke.web.app/Voting.html">https://user-voting-site-2026-ke.web.app/Voting.html</a></p>
               <p>Thank you for participating in the Kirinyaga County elections.</p>
               <hr>
               <p style="font-size: 12px; color: #666;">This is an automated message from Kirinyaga County Election Commission.</p>
