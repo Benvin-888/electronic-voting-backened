@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const rateLimit = require('express-rate-limit');
 const { protect, authorize } = require('../middlewares/authMiddleware');
 const { validateVoterRegistration } = require('../middlewares/validationMiddleware');
 const auditLogMiddleware = require('../middlewares/auditMiddleware');
@@ -19,6 +20,7 @@ const {
   // Self-registration functions
   uploadIDForSelfRegistration,
   selfRegisterVoter,
+  updateTempVoterName, // NEW: Import the update function
   upload   // multer instance from controller
 } = require('../controllers/voterController');
 
@@ -26,9 +28,26 @@ const {
 router.use(auditLogMiddleware);
 
 // ========== PUBLIC ROUTES (no authentication) ==========
+// Rate limiters for public endpoints
+const uploadLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5, // 5 uploads per IP
+  message: { success: false, error: 'Too many upload attempts, please try again later.' }
+});
+
+const registerLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 3, // 3 registrations per IP
+  message: { success: false, error: 'Too many registration attempts from this IP, please try again later.' }
+});
+
+// NEW: Update temp voter name (public)
+router.put('/self/update-name', registerLimiter, updateTempVoterName);
+
 // Upload ID images for self-registration (multipart/form-data)
 router.post(
   '/self/upload-id',
+  uploadLimiter,
   upload.fields([
     { name: 'front', maxCount: 1 },
     { name: 'back', maxCount: 1 }
@@ -37,7 +56,7 @@ router.post(
 );
 
 // Complete self-registration (JSON)
-router.post('/self/register', selfRegisterVoter);
+router.post('/self/register', registerLimiter, selfRegisterVoter);
 
 // ========== PROTECTED ROUTES (require authentication) ==========
 // All routes below this line require authentication
