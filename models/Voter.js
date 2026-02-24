@@ -46,19 +46,7 @@ const voterSchema = new mongoose.Schema({
   },
   ward: {
     type: String,
-    required: [true, 'Ward is required'],
-    validate: {
-      validator: function(v) {
-        const wardsByConstituency = {
-          'Kirinyaga Central': ['Kiamuturi', 'Mutithi', 'Kangai', 'Thiba', 'Wamumu'],
-          'Kirinyaga East': ['Kanyeki-Inoi', 'Kerugoya', 'Inoi', 'Mutonguni', 'Kiamaciri'],
-          'Mwea': ['Thiba', 'Kangai', 'Mutithi', 'Wamumu', 'Mwea'],
-          'Gichugu': ['Ngariama', 'Kanyekini', 'Murinduko', 'Gathigiriri', 'Tebere'],
-          'Ndia': ['Baragwi', 'Njukiini', 'Gichugu', 'Mukure', 'Kiaritha']
-        };
-        return wardsByConstituency[this.constituency]?.includes(v);
-      }
-    }
+    required: [true, 'Ward is required']
   },
   votingNumber: {
     type: String,
@@ -81,7 +69,6 @@ const voterSchema = new mongoose.Schema({
   timestamps: true
 });
 
-// Pre-save hook to generate voting number
 voterSchema.pre('save', async function(next) {
   if (!this.votingNumber) {
     const generateVotingNumber = require('../utils/generateVotingNumber');
