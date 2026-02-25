@@ -42,7 +42,8 @@ const constituencyData = {
       'Njukiini',
       'Gichugu',
       'Mukure',
-      'Kiaritha'
+      'Kiaritha',
+      'Kiinie'
     ]
   },
   
