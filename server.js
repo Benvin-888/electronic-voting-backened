@@ -7,6 +7,7 @@ const xss = require('xss-clean');
 const mongoSanitize = require('express-mongo-sanitize');
 const http = require('http');
 const socketIo = require('socket.io');
+const path = require('path');
 
 console.log("🚀 Starting Voting System Server...");
 
@@ -21,6 +22,8 @@ const votingRoutes = require('./routes/votingRoutes');
 const resultsRoutes = require('./routes/resultRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 const authRoutes = require('./routes/authRoutes');
+// ===== ADD FEEDBACK ROUTES =====
+const feedbackRoutes = require('./routes/feedbackRoutes');
 
 console.log("📦 All routes imported successfully");
 
@@ -56,7 +59,9 @@ mongoose.connection.on("error", (err) => {
 
 // Security middleware
 console.log("🛡️ Applying security middleware...");
-app.use(helmet());
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: "cross-origin" }
+}));
 app.use(cors());
 //app.use(xss());
 //app.use(mongoSanitize());
@@ -73,9 +78,13 @@ app.use('/api', limiter);
 console.log("⏳ Rate limiter configured");
 
 // Body parser
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 console.log("📥 Body parsers enabled");
+
+// Serve static files (for frontend)
+app.use(express.static(path.join(__dirname, 'public')));
+console.log("📁 Static files served from /public");
 
 // Log every incoming request
 app.use((req, res, next) => {
@@ -97,8 +106,15 @@ app.use('/api/v1/candidates', candidateRoutes);
 app.use('/api/v1/voting', votingRoutes);
 app.use('/api/v1/results', resultsRoutes);
 app.use('/api/v1/admin', adminRoutes);
+// ===== ADD FEEDBACK ROUTES =====
+app.use('/api/v1/feedback', feedbackRoutes);
 
 console.log("✅ All routes registered successfully");
+
+// Serve feedback form directly
+app.get('/feedback', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'feedback.html'));
+});
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -137,6 +153,7 @@ server.listen(PORT, () => {
   console.log("======================================");
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`🌍 Mode: ${process.env.NODE_ENV}`);
+  console.log(`📝 Feedback form: http://localhost:${PORT}/feedback`);
   console.log("======================================");
 });
 
