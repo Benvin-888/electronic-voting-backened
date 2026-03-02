@@ -24,6 +24,7 @@ const adminRoutes = require('./routes/adminRoutes');
 const authRoutes = require('./routes/authRoutes');
 // ===== ADD FEEDBACK ROUTES =====
 const feedbackRoutes = require('./routes/feedbackRoutes');
+const adminFeedbackRoutes = require('./routes/adminFeedbackRoutes');
 
 console.log("📦 All routes imported successfully");
 
@@ -107,7 +108,11 @@ app.use('/api/v1/voting', votingRoutes);
 app.use('/api/v1/results', resultsRoutes);
 app.use('/api/v1/admin', adminRoutes);
 // ===== ADD FEEDBACK ROUTES =====
-app.use('/api/v1/feedback', feedbackRoutes);
+app.use('/api/v1/admin/feedback', adminFeedbackRoutes); 
+console.log("✅ Admin feedback routes registered successfully");
+// Admin feedback routes
+app.use('/api/v1/feedback', feedbackRoutes); 
+console.log("✅ Feedback routes registered successfully");
 
 console.log("✅ All routes registered successfully");
 
