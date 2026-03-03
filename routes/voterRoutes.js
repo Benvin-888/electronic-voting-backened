@@ -18,7 +18,6 @@ const {
   getTodaysRegistrationsCount,
   checkNationalId,
   checkEmail,
-  verifyWebAuthn, // NEW
   // Self-registration functions
   uploadIDForSelfRegistration,
   selfRegisterVoter,
@@ -43,9 +42,6 @@ const registerLimiter = rateLimit({
   message: { success: false, error: 'Too many registration attempts from this IP, please try again later.' }
 });
 
-// NEW: WebAuthn verification endpoint
-router.post('/verify-webauthn', registerLimiter, verifyWebAuthn);
-
 // Update temp voter name (public)
 router.put('/self/update-name', registerLimiter, updateTempVoterName);
 
@@ -67,7 +63,7 @@ router.post('/self/register', registerLimiter, selfRegisterVoter);
 // All routes below this line require authentication
 router.use(protect);
 
-// Register new voter (admin only) - NOW WITH SIGNATURE & WEBAUTHN
+// Register new voter (admin only) - WITH SIGNATURE ONLY
 router.post(
   '/register',
   authorize('admin', 'super_admin'),

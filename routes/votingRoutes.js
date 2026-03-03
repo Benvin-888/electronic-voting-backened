@@ -6,7 +6,7 @@ const auditLogMiddleware = require('../middlewares/auditMiddleware');
 
 const {
   checkEligibility,
-  verifyWebAuthnAndGetCandidates,
+  verifySignatureAndGetCandidates, // Renamed from verifyWebAuthnAndGetCandidates
   submitVote,
   getVoteReceipt
 } = require('../controllers/votingController');
@@ -40,13 +40,13 @@ const submitLimiter = rateLimit({
 // @access  Public
 router.post('/check-eligibility', votingLimiter, checkEligibility);
 
-// @route   POST /api/v1/voting/verify-webauthn
-// @desc    Step 2: Verify WebAuthn biometric and get candidates
+// @route   POST /api/v1/voting/verify-signature
+// @desc    Step 2: Verify signature and get candidates
 // @access  Public
-router.post('/verify-webauthn', verificationLimiter, verifyWebAuthnAndGetCandidates);
+router.post('/verify-signature', verificationLimiter, verifySignatureAndGetCandidates);
 
 // @route   POST /api/v1/voting/submit
-// @desc    Step 3: Submit votes (after biometric verification)
+// @desc    Step 3: Submit votes (after signature verification)
 // @access  Public
 router.post('/submit', submitLimiter, submitVote);
 

@@ -1,4 +1,5 @@
 // controllers/votingController.js
+const mongoose = require('mongoose');
 const Voter = require('../models/Voter');
 const Candidate = require('../models/Candidate');
 const Vote = require('../models/Vote');
@@ -13,34 +14,27 @@ const hashVotingNumber = (votingNumber) => {
   return crypto.createHash('sha256').update(votingNumber).digest('hex');
 };
 
-// Helper: Verify WebAuthn assertion
-const verifyWebAuthnAssertion = async (voter, assertion) => {
+// Helper: Verify signature (simplified - in production you'd verify against stored signature)
+const verifySignature = async (voter, providedSignature) => {
   try {
-    if (!voter.webauthnCredential) {
-      return { valid: false, error: 'Voter does not have WebAuthn registered' };
+    if (!voter.signature) {
+      return { valid: false, error: 'Voter does not have a signature on file' };
     }
 
-    const { id, signCount } = voter.webauthnCredential;
-    
-    // Check if credential ID matches
-    if (assertion.id !== id) {
-      return { valid: false, error: 'Credential ID mismatch' };
+    // In production, you might want to compare signatures or use a signature verification service
+    // For now, we'll just check if a signature was provided
+    if (!providedSignature) {
+      return { valid: false, error: 'No signature provided' };
     }
-    
-    // Verify sign count to prevent replay attacks
-    if (assertion.response.authenticatorData.signCount !== 0) {
-      if (assertion.response.authenticatorData.signCount <= signCount) {
-        return { valid: false, error: 'Sign count error - possible replay attack' };
-      }
-      
-      // Update sign count
-      voter.webauthnCredential.signCount = assertion.response.authenticatorData.signCount;
-      voter.webauthnCredential.lastUsed = new Date();
-      await voter.save();
+
+    // Validate signature format
+    const signatureRegex = /^data:image\/(png|jpeg|jpg);base64,/;
+    if (!signatureRegex.test(providedSignature)) {
+      return { valid: false, error: 'Invalid signature format' };
     }
-    
-    // In production, you'd verify the cryptographic signature here
-    // using the stored public key
+
+    // Optional: Compare signature with stored signature
+    // This could be done using image comparison libraries in production
     
     return { valid: true };
   } catch (error) {
@@ -73,7 +67,7 @@ const checkEligibility = async (req, res, next) => {
 
     // Find voter by voting number
     const voter = await Voter.findOne({ votingNumber, isActive: true }).select(
-      '_id fullName constituency ward hasVoted webauthnCredential votingNumber'
+      '_id fullName constituency ward hasVoted signature votingNumber'
     );
     
     if (!voter) {
@@ -91,15 +85,15 @@ const checkEligibility = async (req, res, next) => {
       });
     }
 
-    // Check if voter has WebAuthn registered
-    if (!voter.webauthnCredential) {
+    // Check if voter has signature on file
+    if (!voter.signature) {
       return res.status(400).json({
         success: false,
-        error: 'Voter does not have biometric authentication registered. Please contact administrator.'
+        error: 'Voter does not have a signature on file. Please contact administrator.'
       });
     }
 
-    // Return voter info for WebAuthn verification
+    // Return voter info for signature verification
     res.status(200).json({
       success: true,
       data: {
@@ -107,8 +101,9 @@ const checkEligibility = async (req, res, next) => {
         fullName: voter.fullName,
         constituency: voter.constituency,
         ward: voter.ward,
-        requiresWebAuthn: true,
-        credentialId: voter.webauthnCredential.id
+        requiresSignature: true,
+        // Return partial signature info if needed for client-side verification
+        hasSignature: !!voter.signature
       }
     });
   } catch (error) {
@@ -116,17 +111,17 @@ const checkEligibility = async (req, res, next) => {
   }
 };
 
-// @desc    Verify WebAuthn and get eligible candidates (Step 2)
-// @route   POST /api/v1/voting/verify-webauthn
+// @desc    Verify signature and get eligible candidates (Step 2)
+// @route   POST /api/v1/voting/verify-signature
 // @access  Public
-const verifyWebAuthnAndGetCandidates = async (req, res, next) => {
+const verifySignatureAndGetCandidates = async (req, res, next) => {
   try {
-    const { voterId, assertion } = req.body;
+    const { voterId, signature } = req.body;
 
-    if (!voterId || !assertion) {
+    if (!voterId || !signature) {
       return res.status(400).json({
         success: false,
-        error: 'Voter ID and assertion are required'
+        error: 'Voter ID and signature are required'
       });
     }
 
@@ -147,13 +142,13 @@ const verifyWebAuthnAndGetCandidates = async (req, res, next) => {
       });
     }
 
-    // Verify WebAuthn assertion
-    const verification = await verifyWebAuthnAssertion(voter, assertion);
+    // Verify signature
+    const verification = await verifySignature(voter, signature);
 
     if (!verification.valid) {
       return res.status(401).json({
         success: false,
-        error: verification.error || 'Biometric verification failed'
+        error: verification.error || 'Signature verification failed'
       });
     }
 
@@ -161,7 +156,7 @@ const verifyWebAuthnAndGetCandidates = async (req, res, next) => {
     const eligibleCandidates = await getEligibleCandidates(voter);
 
     // Log successful verification
-    await auditLogger.log(voterId, 'WEBAUTHN_VERIFY_SUCCESS', 'Voter', voter._id, {
+    await auditLogger.log(voterId, 'SIGNATURE_VERIFY_SUCCESS', 'Voter', voter._id, {
       constituency: voter.constituency,
       ward: voter.ward
     });
@@ -180,12 +175,12 @@ const verifyWebAuthnAndGetCandidates = async (req, res, next) => {
       }
     });
   } catch (error) {
-    console.error('WebAuthn verification error:', error);
+    console.error('Signature verification error:', error);
     next(error);
   }
 };
 
-// @desc    Submit vote (Step 3 - After biometric verification)
+// @desc    Submit vote (Step 3 - After signature verification)
 // @route   POST /api/v1/voting/submit
 // @access  Public
 const submitVote = async (req, res, next) => {
@@ -309,7 +304,7 @@ const submitVote = async (req, res, next) => {
         ipAddress,
         userAgent,
         verifiedAt: new Date(),
-        verificationMethod: 'webauthn'
+        verificationMethod: 'signature'
       }], { session });
 
       // Update candidate vote count
@@ -341,6 +336,7 @@ const submitVote = async (req, res, next) => {
       constituency: voter.constituency,
       ward: voter.ward,
       positions: votes.map(v => v.position),
+      verificationMethod: 'signature',
       timestamp: new Date()
     });
 
@@ -425,7 +421,8 @@ const getVoteReceipt = async (req, res, next) => {
           position: v.position,
           candidate: v.candidateId?.fullName || 'Unknown',
           party: v.candidateId?.politicalParty || 'Unknown',
-          verifiedAt: v.verifiedAt
+          verifiedAt: v.verifiedAt,
+          verificationMethod: v.verificationMethod
         }))
       }
     });
@@ -496,7 +493,7 @@ const getVotingDeadline = async () => {
 
 module.exports = {
   checkEligibility,
-  verifyWebAuthnAndGetCandidates,
+  verifySignatureAndGetCandidates, // Renamed from verifyWebAuthnAndGetCandidates
   submitVote,
   getVoteReceipt
 };
