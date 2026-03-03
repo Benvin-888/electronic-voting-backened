@@ -1,5 +1,4 @@
 // controllers/votingController.js
-const mongoose = require('mongoose');
 const Voter = require('../models/Voter');
 const Candidate = require('../models/Candidate');
 const Vote = require('../models/Vote');
@@ -7,54 +6,13 @@ const SystemSetting = require('../models/SystemSetting');
 const { sendVoteConfirmationEmail } = require('../utils/emailService');
 const auditLogger = require('../utils/auditLogger');
 const config = require('../config');
-const crypto = require('crypto');
 
-// Helper: Hash voting number for storage (one-way hash)
-const hashVotingNumber = (votingNumber) => {
-  return crypto.createHash('sha256').update(votingNumber).digest('hex');
-};
-
-// Helper: Verify signature (simplified - in production you'd verify against stored signature)
-const verifySignature = async (voter, providedSignature) => {
-  try {
-    if (!voter.signature) {
-      return { valid: false, error: 'Voter does not have a signature on file' };
-    }
-
-    // In production, you might want to compare signatures or use a signature verification service
-    // For now, we'll just check if a signature was provided
-    if (!providedSignature) {
-      return { valid: false, error: 'No signature provided' };
-    }
-
-    // Validate signature format
-    const signatureRegex = /^data:image\/(png|jpeg|jpg);base64,/;
-    if (!signatureRegex.test(providedSignature)) {
-      return { valid: false, error: 'Invalid signature format' };
-    }
-
-    // Optional: Compare signature with stored signature
-    // This could be done using image comparison libraries in production
-    
-    return { valid: true };
-  } catch (error) {
-    return { valid: false, error: error.message };
-  }
-};
-
-// @desc    Check voting eligibility (Step 1 - Enter voting number)
-// @route   POST /api/v1/voting/check-eligibility
+// @desc    Check voting eligibility
+// @route   GET /api/v1/voting/eligibility/:votingNumber
 // @access  Public
 const checkEligibility = async (req, res, next) => {
   try {
-    const { votingNumber } = req.body;
-
-    if (!votingNumber) {
-      return res.status(400).json({
-        success: false,
-        error: 'Voting number is required'
-      });
-    }
+    const { votingNumber } = req.params;
 
     // Check if voting portal is open
     const portalStatus = await SystemSetting.findOne({ key: 'voting_portal_open' });
@@ -65,11 +23,10 @@ const checkEligibility = async (req, res, next) => {
       });
     }
 
-    // Find voter by voting number
-    const voter = await Voter.findOne({ votingNumber, isActive: true }).select(
-      '_id fullName constituency ward hasVoted signature votingNumber'
-    );
-    
+    // Find voter with full details including signature status
+    const voter = await Voter.findOne({ votingNumber, isActive: true })
+      .select('fullName constituency ward hasVoted signature votingNumber');
+      
     if (!voter) {
       return res.status(404).json({
         success: false,
@@ -85,125 +42,54 @@ const checkEligibility = async (req, res, next) => {
       });
     }
 
-    // Check if voter has signature on file
-    if (!voter.signature) {
-      return res.status(400).json({
-        success: false,
-        error: 'Voter does not have a signature on file. Please contact administrator.'
-      });
-    }
-
-    // Return voter info for signature verification
-    res.status(200).json({
-      success: true,
-      data: {
-        voterId: voter._id,
-        fullName: voter.fullName,
-        constituency: voter.constituency,
-        ward: voter.ward,
-        requiresSignature: true,
-        // Return partial signature info if needed for client-side verification
-        hasSignature: !!voter.signature
-      }
-    });
-  } catch (error) {
-    next(error);
-  }
-};
-
-// @desc    Verify signature and get eligible candidates (Step 2)
-// @route   POST /api/v1/voting/verify-signature
-// @access  Public
-const verifySignatureAndGetCandidates = async (req, res, next) => {
-  try {
-    const { voterId, signature } = req.body;
-
-    if (!voterId || !signature) {
-      return res.status(400).json({
-        success: false,
-        error: 'Voter ID and signature are required'
-      });
-    }
-
-    // Find voter
-    const voter = await Voter.findById(voterId);
-    if (!voter) {
-      return res.status(404).json({
-        success: false,
-        error: 'Voter not found'
-      });
-    }
-
-    // Check if already voted
-    if (voter.hasVoted) {
-      return res.status(400).json({
-        success: false,
-        error: 'This voter has already voted'
-      });
-    }
-
-    // Verify signature
-    const verification = await verifySignature(voter, signature);
-
-    if (!verification.valid) {
-      return res.status(401).json({
-        success: false,
-        error: verification.error || 'Signature verification failed'
-      });
-    }
+    // Check if voter has signature (important for verification)
+    const hasSignature = !!(voter.signature);
 
     // Get eligible candidates
     const eligibleCandidates = await getEligibleCandidates(voter);
-
-    // Log successful verification
-    await auditLogger.log(voterId, 'SIGNATURE_VERIFY_SUCCESS', 'Voter', voter._id, {
-      constituency: voter.constituency,
-      ward: voter.ward
-    });
 
     res.status(200).json({
       success: true,
       data: {
         voter: {
-          id: voter._id,
           fullName: voter.fullName,
           constituency: voter.constituency,
-          ward: voter.ward
+          ward: voter.ward,
+          votingNumber: voter.votingNumber,
+          hasSignature: hasSignature
         },
         eligibleCandidates,
-        votingDeadline: await getVotingDeadline()
+        votingDeadline: await getVotingDeadline(),
+        requiresSignatureVerification: true // Flag for frontend to require signature
       }
     });
   } catch (error) {
-    console.error('Signature verification error:', error);
     next(error);
   }
 };
 
-// @desc    Submit vote (Step 3 - After signature verification)
+// @desc    Submit vote with signature verification
 // @route   POST /api/v1/voting/submit
 // @access  Public
 const submitVote = async (req, res, next) => {
-  const session = await mongoose.startSession();
-  session.startTransaction();
-
   try {
-    const { voterId, votes } = req.body;
+    const { votingNumber, votes, signature } = req.body;
     const ipAddress = req.ip;
     const userAgent = req.get('User-Agent');
 
     // Validate input
-    if (!voterId) {
-      return res.status(400).json({
-        success: false,
-        error: 'Voter ID is required'
-      });
-    }
-
     if (!votes || !Array.isArray(votes) || votes.length === 0) {
       return res.status(400).json({
         success: false,
         error: 'No votes provided'
+      });
+    }
+
+    // Validate signature is provided
+    if (!signature) {
+      return res.status(400).json({
+        success: false,
+        error: 'Signature verification is required to vote'
       });
     }
 
@@ -216,27 +102,42 @@ const submitVote = async (req, res, next) => {
       });
     }
 
-    // Find voter with session
-    const voter = await Voter.findOne({ 
-      _id: voterId, 
-      isActive: true 
-    }).session(session);
-
+    // Find voter with signature
+    const voter = await Voter.findOne({ votingNumber, isActive: true });
     if (!voter) {
-      await session.abortTransaction();
-      session.endSession();
       return res.status(404).json({
         success: false,
-        error: 'Voter not found'
+        error: 'Invalid voting number'
       });
     }
 
     if (voter.hasVoted) {
-      await session.abortTransaction();
-      session.endSession();
       return res.status(400).json({
         success: false,
-        error: 'This voter has already voted'
+        error: 'This voting number has already been used'
+      });
+    }
+
+    // Verify signature matches the one on record
+    if (!voter.signature) {
+      return res.status(400).json({
+        success: false,
+        error: 'No signature on record for this voter. Please contact election administrator.'
+      });
+    }
+
+    // Compare signatures (simple string comparison since they're base64)
+    if (voter.signature !== signature) {
+      // Log signature mismatch attempt
+      await auditLogger.log(null, 'SIGNATURE_MISMATCH', 'Vote', null, {
+        votingNumber,
+        reason: 'Signature verification failed',
+        ipAddress
+      });
+
+      return res.status(400).json({
+        success: false,
+        error: 'Signature verification failed. Please use the signature you registered with.'
       });
     }
 
@@ -247,8 +148,6 @@ const submitVote = async (req, res, next) => {
     // Check for duplicate positions
     const uniquePositions = [...new Set(votedPositions)];
     if (uniquePositions.length !== votedPositions.length) {
-      await session.abortTransaction();
-      session.endSession();
       return res.status(400).json({
         success: false,
         error: 'Duplicate positions in vote submission'
@@ -258,8 +157,6 @@ const submitVote = async (req, res, next) => {
     // Validate all required positions are present
     for (const position of requiredPositions) {
       if (!votedPositions.includes(position)) {
-        await session.abortTransaction();
-        session.endSession();
         return res.status(400).json({
           success: false,
           error: `Missing vote for position: ${position}`
@@ -267,13 +164,10 @@ const submitVote = async (req, res, next) => {
       }
     }
 
-    // Hash the voting number for storage
-    const hashedVotingNumber = hashVotingNumber(voter.votingNumber);
-
     // Process each vote
     const votePromises = votes.map(async (vote) => {
       // Validate candidate
-      const candidate = await Candidate.findById(vote.candidateId).session(session);
+      const candidate = await Candidate.findById(vote.candidateId);
       if (!candidate || !candidate.isActive) {
         throw new Error(`Invalid candidate for ${vote.position}`);
       }
@@ -283,19 +177,9 @@ const submitVote = async (req, res, next) => {
         throw new Error(`Candidate ${candidate.fullName} is not eligible for ${vote.position} in your area`);
       }
 
-      // Check if vote for this position already exists (shouldn't happen due to unique index)
-      const existingVote = await Vote.findOne({
-        votingNumber: hashedVotingNumber,
-        position: vote.position
-      }).session(session);
-
-      if (existingVote) {
-        throw new Error(`Vote already cast for position: ${vote.position}`);
-      }
-
-      // Create vote record with hashed voting number
-      const voteRecord = await Vote.create([{
-        votingNumber: hashedVotingNumber,
+      // Create vote record
+      const voteRecord = await Vote.create({
+        votingNumber,
         position: vote.position,
         candidateId: vote.candidateId,
         county: voter.county,
@@ -303,18 +187,15 @@ const submitVote = async (req, res, next) => {
         ward: voter.ward,
         ipAddress,
         userAgent,
-        verifiedAt: new Date(),
-        verificationMethod: 'signature'
-      }], { session });
+        signatureVerified: true // Mark that signature was verified
+      });
 
       // Update candidate vote count
-      await Candidate.findByIdAndUpdate(
-        vote.candidateId, 
-        { $inc: { voteCount: 1 } },
-        { session }
-      );
+      await Candidate.findByIdAndUpdate(vote.candidateId, {
+        $inc: { voteCount: 1 }
+      });
 
-      return voteRecord[0];
+      return voteRecord;
     });
 
     await Promise.all(votePromises);
@@ -322,25 +203,21 @@ const submitVote = async (req, res, next) => {
     // Mark voter as voted
     voter.hasVoted = true;
     voter.votedAt = new Date();
-    await voter.save({ session });
+    await voter.save();
 
-    await session.commitTransaction();
-    session.endSession();
-
-    // Send confirmation email (without revealing voting number)
+    // Send confirmation email
     await sendVoteConfirmationEmail(voter);
 
-    // Log the vote (without voter identification, just hashed identifier)
-    await auditLogger.log(null, 'VOTE_CAST', 'Vote', null, {
-      hashedVotingNumber: hashedVotingNumber.substring(0, 8) + '...', // Only log partial hash
+    // Log the vote with signature verification
+    await auditLogger.log(null, 'VOTE', 'Vote', null, {
       constituency: voter.constituency,
       ward: voter.ward,
       positions: votes.map(v => v.position),
-      verificationMethod: 'signature',
-      timestamp: new Date()
+      signatureVerified: true,
+      hasSignature: true
     });
 
-    // Emit vote update via Socket.io (anonymous)
+    // Emit vote update via Socket.io
     if (req.io) {
       req.io.emit('voteUpdate', {
         constituency: voter.constituency,
@@ -351,79 +228,56 @@ const submitVote = async (req, res, next) => {
 
     res.status(200).json({
       success: true,
-      message: 'Vote submitted successfully',
+      message: 'Vote submitted successfully with signature verification',
       data: {
         votedAt: new Date(),
         positions: votes.map(v => v.position),
-        receipt: hashedVotingNumber.substring(0, 8) // Partial hash as receipt
+        signatureVerified: true
       }
     });
   } catch (error) {
-    await session.abortTransaction();
-    session.endSession();
-    
     console.error('Vote submission error:', error);
-    
-    if (error.message.includes('Invalid candidate')) {
-      return res.status(400).json({
-        success: false,
-        error: error.message
-      });
-    }
-    
-    if (error.code === 11000) {
-      return res.status(400).json({
-        success: false,
-        error: 'Duplicate vote detected. You have already voted for this position.'
-      });
-    }
-    
     next(error);
   }
 };
 
-// @desc    Get vote receipt (verify vote was counted)
-// @route   POST /api/v1/voting/receipt
-// @access  Public
-const getVoteReceipt = async (req, res, next) => {
+// @desc    Get voter signature for verification (optional - if needed for client-side)
+// @route   GET /api/v1/voting/signature/:votingNumber
+// @access  Public (with rate limiting)
+const getVoterSignatureForVerification = async (req, res, next) => {
   try {
-    const { votingNumber } = req.body;
+    const { votingNumber } = req.params;
 
-    if (!votingNumber) {
+    // Check if voting portal is open
+    const portalStatus = await SystemSetting.findOne({ key: 'voting_portal_open' });
+    if (!portalStatus || !portalStatus.value) {
       return res.status(400).json({
         success: false,
-        error: 'Voting number is required'
+        error: 'Voting portal is currently closed'
       });
     }
 
-    // Hash the voting number to find votes
-    const hashedVotingNumber = hashVotingNumber(votingNumber);
+    const voter = await Voter.findOne({ votingNumber, isActive: true, hasVoted: false })
+      .select('signature');
 
-    // Find votes by hashed voting number
-    const votes = await Vote.find({ 
-      votingNumber: hashedVotingNumber 
-    }).populate('candidateId', 'fullName politicalParty');
-
-    if (!votes || votes.length === 0) {
+    if (!voter) {
       return res.status(404).json({
         success: false,
-        error: 'No votes found for this voting number'
+        error: 'Invalid voting number or voter has already voted'
       });
     }
 
-    // Return receipt without revealing voting number
+    if (!voter.signature) {
+      return res.status(404).json({
+        success: false,
+        error: 'No signature found for this voter'
+      });
+    }
+
     res.status(200).json({
       success: true,
       data: {
-        receipt: hashedVotingNumber.substring(0, 8),
-        votedAt: votes[0].votedAt,
-        positions: votes.map(v => ({
-          position: v.position,
-          candidate: v.candidateId?.fullName || 'Unknown',
-          party: v.candidateId?.politicalParty || 'Unknown',
-          verifiedAt: v.verifiedAt,
-          verificationMethod: v.verificationMethod
-        }))
+        signature: voter.signature
       }
     });
   } catch (error) {
@@ -440,21 +294,21 @@ const getEligibleCandidates = async (voter) => {
     position: 'Governor',
     county: 'Kirinyaga',
     isActive: true
-  }).select('fullName politicalParty photo biography');
+  }).select('fullName politicalParty photo candidateId');
 
   // Women Representative (county-wide)
   eligibleCandidates['Women Representative'] = await Candidate.find({
     position: 'Women Representative',
     county: 'Kirinyaga',
     isActive: true
-  }).select('fullName politicalParty photo biography');
+  }).select('fullName politicalParty photo candidateId');
 
   // MP (constituency)
   eligibleCandidates.MP = await Candidate.find({
     position: 'MP',
     constituency: voter.constituency,
     isActive: true
-  }).select('fullName politicalParty photo biography');
+  }).select('fullName politicalParty photo candidateId');
 
   // MCA (ward)
   eligibleCandidates.MCA = await Candidate.find({
@@ -462,7 +316,7 @@ const getEligibleCandidates = async (voter) => {
     constituency: voter.constituency,
     ward: voter.ward,
     isActive: true
-  }).select('fullName politicalParty photo biography');
+  }).select('fullName politicalParty photo candidateId');
 
   return eligibleCandidates;
 };
@@ -493,7 +347,6 @@ const getVotingDeadline = async () => {
 
 module.exports = {
   checkEligibility,
-  verifySignatureAndGetCandidates, // Renamed from verifyWebAuthnAndGetCandidates
   submitVote,
-  getVoteReceipt
+  getVoterSignatureForVerification
 };
