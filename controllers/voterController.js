@@ -1,3 +1,4 @@
+// controllers/voterController.js
 const Voter = require('../models/Voter');
 const TempVoterData = require('../models/TempVoterData');
 const { sendRegistrationEmail } = require('../utils/emailService');
@@ -47,6 +48,26 @@ const validatePhoneNumber = (phone) => {
   const cleaned = phone.replace(/\D/g, '');
   // Check if it's a valid Kenyan number (07XX XXX XXX or 2547XX XXX XXX)
   return /^(?:(?:(?:254|0)[17]\d{8})|(?:254|0)[17]\d{8})$/.test(cleaned);
+};
+
+// Helper: Validate signature format and size
+const validateSignature = (signature) => {
+  if (!signature) return { valid: false, error: 'Signature is required' };
+  
+  // Check if it's a valid base64 image
+  const signatureRegex = /^data:image\/(png|jpeg|jpg);base64,/;
+  if (!signatureRegex.test(signature)) {
+    return { valid: false, error: 'Invalid signature format. Must be a base64 encoded image' };
+  }
+  
+  // Check size (max 1MB)
+  const base64Data = signature.split(',')[1];
+  const signatureSize = Buffer.from(base64Data, 'base64').length;
+  if (signatureSize > 1024 * 1024) {
+    return { valid: false, error: 'Signature image too large. Maximum size is 1MB' };
+  }
+  
+  return { valid: true };
 };
 
 // Helper: Detect blur using Laplacian variance (via sharp)
@@ -449,21 +470,75 @@ const verifyRecaptcha = async (token) => {
 
 // ========== ADMIN FUNCTIONS ==========
 
-// @desc    Register new voter
+// @desc    Register new voter (Admin only) - WITH SIGNATURE & WEBAUTHN
 // @route   POST /api/v1/voters/register
 // @access  Private (Admin)
 const registerVoter = async (req, res, next) => {
   try {
-    const { nationalId, fullName, email, phoneNumber, constituency, ward } = req.body;
+    const { 
+      nationalId, 
+      fullName, 
+      email, 
+      phoneNumber, 
+      constituency, 
+      ward,
+      signature,
+      webauthnCredential,
+      deviceName 
+    } = req.body;
 
-    // Validate input
+    // Validate all required fields
     if (!nationalId || !fullName || !email || !phoneNumber || !constituency || !ward) {
       return res.status(400).json({
         success: false,
-        error: 'All fields are required'
+        error: 'All basic fields are required'
       });
     }
 
+    // Validate signature (required)
+    const signatureValidation = validateSignature(signature);
+    if (!signatureValidation.valid) {
+      return res.status(400).json({
+        success: false,
+        error: signatureValidation.error
+      });
+    }
+
+    // Validate WebAuthn credential (required)
+    if (!webauthnCredential) {
+      return res.status(400).json({
+        success: false,
+        error: 'WebAuthn credential is required'
+      });
+    }
+
+    const { id, publicKey, signCount } = webauthnCredential;
+    
+    if (!id || !publicKey) {
+      return res.status(400).json({
+        success: false,
+        error: 'WebAuthn credential must include id and publicKey'
+      });
+    }
+
+    // Validate WebAuthn credential ID format (base64url)
+    const base64urlRegex = /^[A-Za-z0-9_-]+$/;
+    if (!base64urlRegex.test(id)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid WebAuthn credential ID format'
+      });
+    }
+
+    // Validate public key format (base64url)
+    if (!base64urlRegex.test(publicKey)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid WebAuthn public key format'
+      });
+    }
+
+    // Validate email
     if (!validateEmail(email)) {
       return res.status(400).json({
         success: false,
@@ -471,6 +546,7 @@ const registerVoter = async (req, res, next) => {
       });
     }
 
+    // Validate phone number
     if (!validatePhoneNumber(phoneNumber)) {
       return res.status(400).json({
         success: false,
@@ -490,6 +566,18 @@ const registerVoter = async (req, res, next) => {
       });
     }
 
+    // Check if WebAuthn credential ID is already used
+    const existingCredential = await Voter.findOne({ 
+      'webauthnCredential.id': id 
+    });
+
+    if (existingCredential) {
+      return res.status(400).json({
+        success: false,
+        error: 'This WebAuthn credential is already registered to another voter'
+      });
+    }
+
     // Validate ward belongs to constituency
     const isValidWard = constituencyData.validateWard(constituency, ward);
     if (!isValidWard) {
@@ -499,25 +587,38 @@ const registerVoter = async (req, res, next) => {
       });
     }
 
-    // Create voter
-    const voter = await Voter.create({
+    // Create voter with required new fields
+    const voterData = {
       nationalId,
       fullName,
       email,
       phoneNumber,
       constituency,
       ward,
-      county: 'Kirinyaga'
-    });
+      county: 'Kirinyaga',
+      signature,
+      webauthnCredential: {
+        id,
+        publicKey,
+        signCount: signCount || 0,
+        deviceName: deviceName || 'Unknown Device',
+        lastUsed: new Date()
+      }
+    };
 
-    // Send registration email
+    // Create voter
+    const voter = await Voter.create(voterData);
+
+    // Send registration email with voting number
     await sendRegistrationEmail(voter, voter.votingNumber);
 
     // Log the action
     await auditLogger.log(req.admin?._id || req.user?._id, 'CREATE', 'Voter', voter._id, {
       nationalId: voter.nationalId,
       constituency: voter.constituency,
-      ward: voter.ward
+      ward: voter.ward,
+      hasWebAuthn: true,
+      hasSignature: true
     });
 
     res.status(201).json({
@@ -526,11 +627,81 @@ const registerVoter = async (req, res, next) => {
         votingNumber: voter.votingNumber,
         fullName: voter.fullName,
         constituency: voter.constituency,
-        ward: voter.ward
+        ward: voter.ward,
+        hasSignature: true,
+        hasWebAuthn: true
       },
-      message: 'Voter registered successfully. Email sent with voting number.'
+      message: 'Voter registered successfully with biometric (WebAuthn) and signature. Email sent with voting number.'
     });
   } catch (error) {
+    console.error('Registration error:', error);
+    
+    // Check for duplicate key error
+    if (error.code === 11000) {
+      const field = Object.keys(error.keyPattern)[0];
+      return res.status(400).json({
+        success: false,
+        error: `Duplicate value for ${field}. Please use unique values.`
+      });
+    }
+    
+    next(error);
+  }
+};
+
+// @desc    Verify WebAuthn assertion during voting
+// @route   POST /api/v1/voters/verify-webauthn
+// @access  Public (with rate limiting)
+const verifyWebAuthn = async (req, res, next) => {
+  try {
+    const { voterId, assertion } = req.body;
+
+    if (!voterId || !assertion) {
+      return res.status(400).json({
+        success: false,
+        error: 'Voter ID and assertion are required'
+      });
+    }
+
+    // Find voter
+    const voter = await Voter.findById(voterId);
+    if (!voter) {
+      return res.status(404).json({
+        success: false,
+        error: 'Voter not found'
+      });
+    }
+
+    // Check if voter has WebAuthn credential
+    if (!voter.webauthnCredential) {
+      return res.status(400).json({
+        success: false,
+        error: 'Voter does not have WebAuthn registered'
+      });
+    }
+
+    // Verify the assertion using the voter's method
+    const verification = await voter.verifyWebAuthnAssertion(assertion);
+
+    if (!verification.valid) {
+      return res.status(401).json({
+        success: false,
+        error: verification.error || 'WebAuthn verification failed'
+      });
+    }
+
+    // Log successful verification
+    await auditLogger.log(voterId, 'WEBAUTHN_VERIFY', 'Voter', voter._id, {
+      success: true
+    });
+
+    res.status(200).json({
+      success: true,
+      message: 'WebAuthn verification successful',
+      data: voter.getPublicInfo()
+    });
+  } catch (error) {
+    console.error('WebAuthn verification error:', error);
     next(error);
   }
 };
@@ -557,7 +728,7 @@ const getVoterCount = async (req, res, next) => {
 const getPendingVoters = async (req, res, next) => {
   try {
     const pendingVoters = await Voter.find({ hasVoted: false })
-      .select('votingNumber fullName constituency ward registrationDate createdAt')
+      .select('votingNumber fullName constituency ward registrationDate createdAt signature webauthnCredential')
       .sort({ registrationDate: -1, createdAt: -1 });
     
     const count = pendingVoters.length;
@@ -565,7 +736,11 @@ const getPendingVoters = async (req, res, next) => {
     res.status(200).json({
       success: true,
       count,
-      data: pendingVoters
+      data: pendingVoters.map(v => ({
+        ...v.toObject(),
+        hasSignature: !!v.signature,
+        hasWebAuthn: !!v.webauthnCredential
+      }))
     });
   } catch (error) {
     next(error);
@@ -578,7 +753,7 @@ const getPendingVoters = async (req, res, next) => {
 const getVotedVoters = async (req, res, next) => {
   try {
     const votedVoters = await Voter.find({ hasVoted: true })
-      .select('votingNumber fullName constituency ward registrationDate createdAt votedAt')
+      .select('votingNumber fullName constituency ward registrationDate createdAt votedAt signature webauthnCredential')
       .sort({ votedAt: -1, registrationDate: -1 });
     
     const count = votedVoters.length;
@@ -586,7 +761,11 @@ const getVotedVoters = async (req, res, next) => {
     res.status(200).json({
       success: true,
       count,
-      data: votedVoters
+      data: votedVoters.map(v => ({
+        ...v.toObject(),
+        hasSignature: !!v.signature,
+        hasWebAuthn: !!v.webauthnCredential
+      }))
     });
   } catch (error) {
     next(error);
@@ -617,7 +796,7 @@ const getWardsByConstituency = async (req, res, next) => {
   }
 };
 
-// @desc    Get voter statistics
+// @desc    Get voter statistics including WebAuthn/signature stats
 // @route   GET /api/v1/voters/statistics
 // @access  Private (Admin)
 const getVoterStatistics = async (req, res, next) => {
@@ -626,6 +805,10 @@ const getVoterStatistics = async (req, res, next) => {
     const votedCount = await Voter.countDocuments({ hasVoted: true });
     const pendingCount = totalVoters - votedCount;
     
+    // Get WebAuthn and signature stats
+    const webAuthnCount = await Voter.countDocuments({ 'webauthnCredential.id': { $exists: true } });
+    const signatureCount = await Voter.countDocuments({ signature: { $exists: true, $ne: null } });
+    
     // Count by constituency
     const byConstituency = await Voter.aggregate([
       {
@@ -633,7 +816,8 @@ const getVoterStatistics = async (req, res, next) => {
           _id: '$constituency',
           total: { $sum: 1 },
           voted: { $sum: { $cond: [{ $eq: ['$hasVoted', true] }, 1, 0] } },
-          pending: { $sum: { $cond: [{ $eq: ['$hasVoted', false] }, 1, 0] } }
+          pending: { $sum: { $cond: [{ $eq: ['$hasVoted', false] }, 1, 0] } },
+          withWebAuthn: { $sum: { $cond: [{ $ne: ['$webauthnCredential', null] }, 1, 0] } }
         }
       },
       {
@@ -642,6 +826,7 @@ const getVoterStatistics = async (req, res, next) => {
           total: 1,
           voted: 1,
           pending: 1,
+          withWebAuthn: 1,
           _id: 0
         }
       },
@@ -687,7 +872,10 @@ const getVoterStatistics = async (req, res, next) => {
           voted: votedCount,
           pending: pendingCount,
           percentageVoted: totalVoters > 0 ? ((votedCount / totalVoters) * 100).toFixed(2) : 0,
-          recentRegistrations
+          recentRegistrations,
+          biometricEnabled: webAuthnCount,
+          signatureCollected: signatureCount,
+          biometricPercentage: totalVoters > 0 ? ((webAuthnCount / totalVoters) * 100).toFixed(2) : 0
         },
         byConstituency,
         byWard
@@ -706,14 +894,18 @@ const getRecentRegistrations = async (req, res, next) => {
     const limit = parseInt(req.query.limit) || 10;
     
     const recentVoters = await Voter.find()
-      .select('fullName votingNumber constituency registrationDate createdAt')
+      .select('fullName votingNumber constituency registrationDate createdAt signature webauthnCredential')
       .sort({ registrationDate: -1, createdAt: -1 })
       .limit(limit);
     
     res.status(200).json({
       success: true,
       count: recentVoters.length,
-      data: recentVoters,
+      data: recentVoters.map(v => ({
+        ...v.toObject(),
+        hasSignature: !!v.signature,
+        hasWebAuthn: !!v.webauthnCredential
+      })),
       lastUpdated: new Date()
     });
   } catch (error) {
@@ -1050,13 +1242,45 @@ const uploadIDForSelfRegistration = async (req, res, next) => {
 // @access  Public
 const selfRegisterVoter = async (req, res, next) => {
   try {
-    const { tempToken, email, phoneNumber, constituency, ward, declaration, recaptchaToken } = req.body;
+    const { tempToken, email, phoneNumber, constituency, ward, declaration, recaptchaToken, signature, webauthnCredential } = req.body;
 
     // Validate required fields
     if (!tempToken || !email || !phoneNumber || !constituency || !ward || declaration === undefined) {
       return res.status(400).json({ 
         success: false, 
         error: 'All fields are required' 
+      });
+    }
+
+    // Validate signature for self-registration
+    if (!signature) {
+      return res.status(400).json({
+        success: false,
+        error: 'Signature is required'
+      });
+    }
+
+    const signatureValidation = validateSignature(signature);
+    if (!signatureValidation.valid) {
+      return res.status(400).json({
+        success: false,
+        error: signatureValidation.error
+      });
+    }
+
+    // Validate WebAuthn credential for self-registration
+    if (!webauthnCredential) {
+      return res.status(400).json({
+        success: false,
+        error: 'WebAuthn credential is required'
+      });
+    }
+
+    const { id, publicKey } = webauthnCredential;
+    if (!id || !publicKey) {
+      return res.status(400).json({
+        success: false,
+        error: 'WebAuthn credential must include id and publicKey'
       });
     }
 
@@ -1113,6 +1337,18 @@ const selfRegisterVoter = async (req, res, next) => {
       });
     }
 
+    // Check if WebAuthn credential ID is already used
+    const existingCredential = await Voter.findOne({ 
+      'webauthnCredential.id': id 
+    });
+
+    if (existingCredential) {
+      return res.status(400).json({
+        success: false,
+        error: 'This WebAuthn credential is already registered to another voter'
+      });
+    }
+
     // Validate ward belongs to constituency
     const isValidWard = constituencyData.validateWard(constituency, ward);
     if (!isValidWard) {
@@ -1123,21 +1359,27 @@ const selfRegisterVoter = async (req, res, next) => {
     }
 
     // ===== CRITICAL: Use the fullName from tempData as is =====
-    // This contains the user-edited name if they updated it in Step 2
-    // DO NOT reconstruct from surname/givenNames as that would override user edits
     const fullName = tempData.fullName;
 
     console.log('✅ Registering voter with name:', fullName);
 
-    // Create voter using data from temp record with the user's confirmed/edited name
+    // Create voter with signature and WebAuthn
     const voter = await Voter.create({
       nationalId: tempData.nationalId,
-      fullName: fullName, // This preserves the user's edits from Step 2
+      fullName: fullName,
       email,
       phoneNumber,
       constituency,
       ward,
-      county: 'Kirinyaga'
+      county: 'Kirinyaga',
+      signature,
+      webauthnCredential: {
+        id,
+        publicKey,
+        signCount: webauthnCredential.signCount || 0,
+        deviceName: webauthnCredential.deviceName || 'Unknown Device',
+        lastUsed: new Date()
+      }
     });
 
     // Delete temp data after successful registration
@@ -1150,7 +1392,9 @@ const selfRegisterVoter = async (req, res, next) => {
     await auditLogger.log(null, 'SELF_REGISTER', 'Voter', voter._id, {
       nationalId: voter.nationalId,
       constituency: voter.constituency,
-      ward: voter.ward
+      ward: voter.ward,
+      hasWebAuthn: true,
+      hasSignature: true
     });
 
     res.status(201).json({
@@ -1159,9 +1403,11 @@ const selfRegisterVoter = async (req, res, next) => {
         votingNumber: voter.votingNumber,
         fullName: voter.fullName,
         constituency: voter.constituency,
-        ward: voter.ward
+        ward: voter.ward,
+        hasSignature: true,
+        hasWebAuthn: true
       },
-      message: 'Registration successful. Email sent with voting number.'
+      message: 'Registration successful with biometric and signature. Email sent with voting number.'
     });
   } catch (error) {
     console.error('SELF REGISTER ERROR:', error);
@@ -1182,6 +1428,7 @@ module.exports = {
   getTodaysRegistrationsCount,
   checkNationalId,
   checkEmail,
+  verifyWebAuthn, // NEW
   
   // Self-registration functions
   uploadIDForSelfRegistration,

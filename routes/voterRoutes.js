@@ -1,3 +1,4 @@
+// routes/voterRoutes.js
 const express = require('express');
 const router = express.Router();
 const rateLimit = require('express-rate-limit');
@@ -17,10 +18,11 @@ const {
   getTodaysRegistrationsCount,
   checkNationalId,
   checkEmail,
+  verifyWebAuthn, // NEW
   // Self-registration functions
   uploadIDForSelfRegistration,
   selfRegisterVoter,
-  updateTempVoterName, // NEW: Import the update function
+  updateTempVoterName,
   upload   // multer instance from controller
 } = require('../controllers/voterController');
 
@@ -41,7 +43,10 @@ const registerLimiter = rateLimit({
   message: { success: false, error: 'Too many registration attempts from this IP, please try again later.' }
 });
 
-// NEW: Update temp voter name (public)
+// NEW: WebAuthn verification endpoint
+router.post('/verify-webauthn', registerLimiter, verifyWebAuthn);
+
+// Update temp voter name (public)
 router.put('/self/update-name', registerLimiter, updateTempVoterName);
 
 // Upload ID images for self-registration (multipart/form-data)
@@ -62,7 +67,7 @@ router.post('/self/register', registerLimiter, selfRegisterVoter);
 // All routes below this line require authentication
 router.use(protect);
 
-// Register new voter (admin only)
+// Register new voter (admin only) - NOW WITH SIGNATURE & WEBAUTHN
 router.post(
   '/register',
   authorize('admin', 'super_admin'),
