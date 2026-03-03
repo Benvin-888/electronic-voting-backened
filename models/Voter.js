@@ -1,81 +1,114 @@
-// models/Vote.js
+// models/Voter.js
 const mongoose = require('mongoose');
+const validator = require('validator');
 
-const voteSchema = new mongoose.Schema({
-  votingNumber: {
+const voterSchema = new mongoose.Schema({
+  nationalId: {
     type: String,
-    required: [true, 'Voting number is required'],
-    index: true
-    // Removed ref: 'Voter' to maintain anonymity - stores hashed value
+    required: [true, 'National ID is required'],
+    unique: true,
+    trim: true,
+    minlength: [7, 'National ID must be at least 7 characters'],
+    maxlength: [10, 'National ID cannot exceed 10 characters']
+    // Remove index: true - unique creates index automatically
   },
-  position: {
+  fullName: {
     type: String,
-    required: [true, 'Position is required'],
-    enum: ['Governor', 'Women Representative', 'MP', 'MCA']
+    required: [true, 'Full name is required'],
+    trim: true
   },
-  candidateId: {
-    type: mongoose.Schema.Types.ObjectId,
-    required: [true, 'Candidate ID is required'],
-    ref: 'Candidate'
+  email: {
+    type: String,
+    required: [true, 'Email is required'],
+    unique: true,
+    lowercase: true,
+    trim: true,
+    validate: [validator.isEmail, 'Please provide a valid email']
+    // Remove index: true - unique creates index automatically
+  },
+  phoneNumber: {
+    type: String,
+    required: [true, 'Phone number is required'],
+    trim: true,
+    validate: {
+      validator: function(v) {
+        return /^[0-9]{10}$/.test(v);
+      },
+      message: 'Phone number must be 10 digits'
+    }
   },
   county: {
     type: String,
-    required: [true, 'County is required']
+    default: 'Kirinyaga',
+    enum: ['Kirinyaga']
   },
   constituency: {
     type: String,
-    required: [true, 'Constituency is required']
+    required: [true, 'Constituency is required'],
+    enum: ['Kirinyaga Central', 'Kirinyaga East', 'Mwea', 'Gichugu', 'Ndia']
   },
   ward: {
     type: String,
     required: [true, 'Ward is required']
   },
-  votedAt: {
-    type: Date,
-    default: Date.now
-  },
-  verifiedAt: {
-    type: Date,
-    default: Date.now
-  },
-  verificationMethod: {
-    type: String,
-    enum: ['signature', 'manual'],
-    default: 'signature'
-  },
-  ipAddress: {
-    type: String
-  },
-  userAgent: {
-    type: String
-  },
-  transactionHash: {
+  votingNumber: {
     type: String,
     unique: true,
     sparse: true
+    // Remove index: true - unique creates index automatically
+  },
+  hasVoted: {
+    type: Boolean,
+    default: false
+  },
+  registrationDate: {
+    type: Date,
+    default: Date.now
+  },
+  isActive: {
+    type: Boolean,
+    default: true
+  },
+  // Signature field
+  signature: {
+    type: String,
+    required: [true, 'Signature is required'],
+    validate: {
+      validator: function(v) {
+        return /^data:image\/(png|jpeg|jpg);base64,/.test(v);
+      },
+      message: 'Signature must be a valid base64 encoded image'
+    }
   }
 }, {
   timestamps: true
 });
 
-// One vote per position per voter (using hashed voting number)
-voteSchema.index({ votingNumber: 1, position: 1 }, { unique: true });
+// Pre-save middleware to generate voting number
+voterSchema.pre('save', async function(next) {
+  if (!this.votingNumber) {
+    const generateVotingNumber = require('../utils/generateVotingNumber');
+    this.votingNumber = generateVotingNumber(this);
+  }
+  next();
+});
 
-// Index for faster queries
-voteSchema.index({ constituency: 1, position: 1 });
-voteSchema.index({ candidateId: 1 });
-voteSchema.index({ votedAt: -1 });
-
-// Method to get public vote info (without sensitive data)
-voteSchema.methods.getPublicInfo = function() {
+// Method to get public voter info (safe for API responses)
+voterSchema.methods.getPublicInfo = function() {
   return {
-    position: this.position,
-    candidateId: this.candidateId,
+    id: this._id,
+    fullName: this.fullName,
+    votingNumber: this.votingNumber,
     constituency: this.constituency,
     ward: this.ward,
-    votedAt: this.votedAt,
-    verificationMethod: this.verificationMethod
+    hasVoted: this.hasVoted,
+    hasSignature: !!this.signature
   };
 };
 
-module.exports = mongoose.model('Vote', voteSchema);
+// Keep only these indexes - remove duplicates
+voterSchema.index({ constituency: 1, ward: 1 });
+voterSchema.index({ registrationDate: -1 });
+voterSchema.index({ hasVoted: 1 });
+
+module.exports = mongoose.model('Voter', voterSchema);

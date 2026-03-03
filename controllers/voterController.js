@@ -1,13 +1,12 @@
 // controllers/voterController.js
 const Voter = require('../models/Voter');
-const TempVoterData = require('../models/TempVoterData');
+const TempVoterData = require('../models/TempVoterData'); // IMPORT TempVoterData
 const { sendRegistrationEmail } = require('../utils/emailService');
 const auditLogger = require('../utils/auditLogger');
 const constituencyData = require('../utils/constituencyData');
 const fs = require('fs');
 const path = require('path');
-const crypto = require('crypto');
-const axios = require('axios');
+const crypto = require('crypto'); // ADD for generateToken
 
 // ========== IMPORTS FOR SELF-REGISTRATION ==========
 const multer = require('multer');
@@ -27,6 +26,11 @@ const upload = multer({
     cb(new Error('Only images are allowed (JPEG, PNG, GIF)'));
   }
 });
+
+// Helper: Generate a secure random token
+const generateToken = () => {
+  return crypto.randomBytes(32).toString('hex');
+};
 
 // Helper: Add timeout to promises
 const withTimeout = (promise, ms = 30000) => {
@@ -50,24 +54,47 @@ const validatePhoneNumber = (phone) => {
   return /^(?:(?:(?:254|0)[17]\d{8})|(?:254|0)[17]\d{8})$/.test(cleaned);
 };
 
-// Helper: Validate signature format and size
+// ===== NEW: Signature validation helper =====
 const validateSignature = (signature) => {
-  if (!signature) return { valid: false, error: 'Signature is required' };
+  if (!signature) {
+    return { valid: false, error: 'Signature is required' };
+  }
   
   // Check if it's a valid base64 image
   const signatureRegex = /^data:image\/(png|jpeg|jpg);base64,/;
   if (!signatureRegex.test(signature)) {
-    return { valid: false, error: 'Invalid signature format. Must be a base64 encoded image' };
+    return { 
+      valid: false, 
+      error: 'Invalid signature format. Must be a base64 encoded image (PNG, JPEG, JPG)' 
+    };
   }
   
-  // Check size (max 1MB)
-  const base64Data = signature.split(',')[1];
-  const signatureSize = Buffer.from(base64Data, 'base64').length;
-  if (signatureSize > 1024 * 1024) {
-    return { valid: false, error: 'Signature image too large. Maximum size is 1MB' };
+  try {
+    // Check size (max 1MB)
+    const base64Data = signature.split(',')[1];
+    const signatureSize = Buffer.from(base64Data, 'base64').length;
+    
+    if (signatureSize > 1024 * 1024) {
+      return { 
+        valid: false, 
+        error: 'Signature image too large. Maximum size is 1MB' 
+      };
+    }
+    
+    if (signatureSize < 100) {
+      return { 
+        valid: false, 
+        error: 'Signature appears to be empty or too small' 
+      };
+    }
+    
+    return { valid: true };
+  } catch (err) {
+    return { 
+      valid: false, 
+      error: 'Invalid signature data format' 
+    };
   }
-  
-  return { valid: true };
 };
 
 // Helper: Detect blur using Laplacian variance (via sharp)
@@ -112,255 +139,105 @@ function cleanOCRText(text) {
   let cleaned = text
     .replace(/[|\\{}[\]_~`]/g, ' ') // Replace special characters with spaces
     .replace(/\s+/g, ' ') // Normalize spaces
-    .replace(/[^\w\s\/\-:.,]/g, '') // Keep periods and commas too
+    .replace(/[^\w\s\/\-:]/g, '') // Remove remaining special chars except slashes, dashes, colons
     .trim();
   
   return cleaned;
 }
 
-// ========== UPDATED OCR EXTRACTION FOR KENYAN ID CARD FORMAT ==========
-// Helper: Extract ID fields from OCR text (Kenyan ID card)
+// Helper: Extract ID fields from OCR text (Kenyan ID card) - IMPROVED VERSION
 function extractIDInfo(ocrText) {
   try {
     if (!ocrText || typeof ocrText !== 'string') {
       console.error('Invalid OCR text provided to extractIDInfo');
-      return { 
-        nationalId: null, 
-        fullName: null, 
-        dateOfBirth: null,
-        surname: null,
-        givenNames: null,
-        sex: null,
-        nationality: null,
-        placeOfBirth: null,
-        dateOfExpiry: null,
-        placeOfIssue: null,
-        cardSerialNumber: null
-      };
+      return { nationalId: null, fullName: null, dateOfBirth: null };
     }
     
     // First, clean the text
     const cleaned = cleanOCRText(ocrText);
     console.log('Cleaned OCR text:', cleaned);
     
-    // Parse the JSON-like structure if present
-    let extracted = {
-      nationalId: null,
-      fullName: null,
-      dateOfBirth: null,
-      surname: null,
-      givenNames: null,
-      sex: null,
-      nationality: null,
-      placeOfBirth: null,
-      dateOfExpiry: null,
-      placeOfIssue: null,
-      cardSerialNumber: null
+    // More flexible patterns for Kenyan ID cards
+    const text = cleaned;
+    
+    // Pattern for National ID - look for 7-8 digit numbers
+    // Try to find ID number near common keywords first
+    let nationalId = null;
+    
+    // Look for ID number after keywords
+    const idKeywordPattern = /(?:id|identity|national|serial)\s*(?:no|number|#)?\s*[:.]?\s*(\d{7,8})/i;
+    const idKeywordMatch = text.match(idKeywordPattern);
+    
+    if (idKeywordMatch) {
+      nationalId = idKeywordMatch[1];
+    } else {
+      // If no keyword match, look for any 7-8 digit number
+      const anyIdPattern = /\b(\d{7,8})\b/;
+      const anyIdMatch = text.match(anyIdPattern);
+      if (anyIdMatch) {
+        nationalId = anyIdMatch[1];
+      }
+    }
+    
+    // Pattern for Full Name - look for name after NAME keyword or between common patterns
+    let fullName = null;
+    
+    // Try multiple name patterns
+    const namePatterns = [
+      /(?:name|fullname|full name)\s*[:.]?\s*([A-Z\s]+?)(?=\s+(?:date|dob|sex|birth|place|citizen|$))/i,
+      /([A-Z]{2,}(?:\s+[A-Z]{2,})+)/ // Look for all caps words (likely a name)
+    ];
+    
+    for (const pattern of namePatterns) {
+      const nameMatch = text.match(pattern);
+      if (nameMatch && nameMatch[1]) {
+        fullName = nameMatch[1].trim();
+        // Clean up the name (remove extra spaces, fix case)
+        fullName = fullName.replace(/\s+/g, ' ').trim();
+        // Convert to title case (each word first letter capital)
+        fullName = fullName.toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
+        break;
+      }
+    }
+    
+    // Pattern for Date of Birth - very flexible
+    let dateOfBirth = null;
+    
+    // Try multiple date patterns
+    const datePatterns = [
+      /(?:dob|date of birth|birth date|birthday|dateofbirth)\s*[:.]?\s*(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/i,
+      /\b(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})\b/
+    ];
+    
+    for (const pattern of datePatterns) {
+      const dateMatch = text.match(pattern);
+      if (dateMatch) {
+        // Try to extract from named groups or indices
+        if (dateMatch.length >= 4) {
+          // Format as DD/MM/YYYY
+          const day = dateMatch[1].padStart(2, '0');
+          const month = dateMatch[2].padStart(2, '0');
+          let year = dateMatch[3];
+          if (year.length === 2) {
+            year = '19' + year; // Assume 19xx for 2-digit years
+          }
+          dateOfBirth = `${day}/${month}/${year}`;
+          break;
+        }
+      }
+    }
+    
+    const result = {
+      nationalId: nationalId,
+      fullName: fullName,
+      dateOfBirth: dateOfBirth
     };
     
-    // Try to find JSON-like structure first (if OCR captures the exact format)
-    const jsonPattern = /"personalInfo"\s*:\s*{([^}]+)}/i;
-    const jsonMatch = cleaned.match(jsonPattern);
-    
-    if (jsonMatch) {
-      console.log('Found JSON-like structure, parsing...');
-      const jsonStr = '{' + jsonMatch[1] + '}';
-      
-      // Extract individual fields from the JSON structure
-      const surnameMatch = jsonStr.match(/"surname"\s*:\s*"([^"]*)"/i);
-      const givenNamesMatch = jsonStr.match(/"givenNames"\s*:\s*"([^"]*)"/i);
-      const sexMatch = jsonStr.match(/"sex"\s*:\s*"([^"]*)"/i);
-      const nationalityMatch = jsonStr.match(/"nationality"\s*:\s*"([^"]*)"/i);
-      const dobMatch = jsonStr.match(/"dateOfBirth"\s*:\s*"([^"]*)"/i);
-      const pobMatch = jsonStr.match(/"placeOfBirth"\s*:\s*"([^"]*)"/i);
-      
-      if (surnameMatch) extracted.surname = surnameMatch[1];
-      if (givenNamesMatch) extracted.givenNames = givenNamesMatch[1];
-      if (sexMatch) extracted.sex = sexMatch[1];
-      if (nationalityMatch) extracted.nationality = nationalityMatch[1];
-      if (dobMatch) extracted.dateOfBirth = dobMatch[1];
-      if (pobMatch) extracted.placeOfBirth = pobMatch[1];
-      
-      // Create full name from surname and given names
-      if (extracted.givenNames || extracted.surname) {
-        const nameParts = [];
-        if (extracted.givenNames) nameParts.push(extracted.givenNames);
-        if (extracted.surname) nameParts.push(extracted.surname);
-        extracted.fullName = nameParts.join(' ').trim();
-      }
-    }
-    
-    // Try to find identification section
-    const identificationPattern = /"identification"\s*:\s*{([^}]+)}/i;
-    const identificationMatch = cleaned.match(identificationPattern);
-    
-    if (identificationMatch) {
-      console.log('Found identification structure, parsing...');
-      const idStr = '{' + identificationMatch[1] + '}';
-      
-      const idNumberMatch = idStr.match(/"idNumber"\s*:\s*"([^"]*)"/i);
-      const expiryMatch = idStr.match(/"dateOfExpiry"\s*:\s*"([^"]*)"/i);
-      const placeIssueMatch = idStr.match(/"placeOfIssue"\s*:\s*"([^"]*)"/i);
-      const cardSerialMatch = idStr.match(/"cardSerialNumber"\s*:\s*"([^"]*)"/i);
-      
-      if (idNumberMatch) extracted.nationalId = idNumberMatch[1];
-      if (expiryMatch) extracted.dateOfExpiry = expiryMatch[1];
-      if (placeIssueMatch) extracted.placeOfIssue = placeIssueMatch[1];
-      if (cardSerialMatch) extracted.cardSerialNumber = cardSerialMatch[1];
-    }
-    
-    // Try to find document info
-    const documentPattern = /"documentInfo"\s*:\s*{([^}]+)}/i;
-    const documentMatch = cleaned.match(documentPattern);
-    
-    if (documentMatch) {
-      console.log('Found document structure, parsing...');
-      const docStr = '{' + documentMatch[1] + '}';
-      
-      const countryMatch = docStr.match(/"country"\s*:\s*"([^"]*)"/i);
-      const docTypeMatch = docStr.match(/"documentType"\s*:\s*"([^"]*)"/i);
-      
-      // We might not need to store these, but we can log them
-      if (countryMatch) console.log('Country:', countryMatch[1]);
-      if (docTypeMatch) console.log('Document Type:', docTypeMatch[1]);
-    }
-    
-    // If JSON parsing failed or fields are missing, fall back to regex patterns
-    if (!extracted.nationalId) {
-      // Look for ID number pattern (781105227 in your example)
-      const idPattern = /\b(\d{7,10})\b/; // 7-10 digit ID numbers
-      const idMatch = cleaned.match(idPattern);
-      if (idMatch) extracted.nationalId = idMatch[1];
-    }
-    
-    if (!extracted.dateOfBirth) {
-      // Look for date of birth pattern (2006-10-16 in your example)
-      const dobPattern = /\b(\d{4}-\d{2}-\d{2})\b/; // YYYY-MM-DD format
-      const dobMatch = cleaned.match(dobPattern);
-      if (dobMatch) extracted.dateOfBirth = dobMatch[1];
-    }
-    
-    if (!extracted.dateOfExpiry) {
-      // Look for expiry date pattern (2035-03-06 in your example)
-      const expiryPattern = /\b(20\d{2}-\d{2}-\d{2})\b/; // Future dates starting with 20
-      const expiryMatch = cleaned.match(expiryPattern);
-      if (expiryMatch && expiryMatch[1] !== extracted.dateOfBirth) {
-        extracted.dateOfExpiry = expiryMatch[1];
-      }
-    }
-    
-    if (!extracted.cardSerialNumber) {
-      // Look for card serial number (2564680419 in your example)
-      const serialPattern = /\b(\d{10})\b/; // 10-digit serial
-      const serialMatch = cleaned.match(serialPattern);
-      if (serialMatch && serialMatch[1] !== extracted.nationalId) {
-        extracted.cardSerialNumber = serialMatch[1];
-      }
-    }
-    
-    if (!extracted.placeOfIssue) {
-      // Look for place of issue (SAGANA in your example)
-      const placePattern = /"placeOfIssue"\s*:\s*"([^"]*)"/i;
-      const placeMatch = cleaned.match(placePattern);
-      if (placeMatch) {
-        extracted.placeOfIssue = placeMatch[1];
-      } else {
-        // Try to find capitalized place names
-        const capitalPattern = /\b([A-Z]{3,})\b/g;
-        const capitals = cleaned.match(capitalPattern);
-        if (capitals && capitals.length > 0) {
-          // Filter out common false positives
-          const possiblePlace = capitals.find(c => 
-            !['KEN', 'MALE', 'FEMALE', 'ID', 'REPUBLIC', 'OF', 'NATIONAL'].includes(c)
-          );
-          if (possiblePlace) extracted.placeOfIssue = possiblePlace;
-        }
-      }
-    }
-    
-    // Try to extract surname and given names if not found yet
-    if (!extracted.surname && !extracted.givenNames) {
-      // Try to extract name components from full name pattern
-      const surnameKeywordMatch = cleaned.match(/"surname"\s*:\s*"([^"]*)"/i);
-      const givenKeywordMatch = cleaned.match(/"givenNames"\s*:\s*"([^"]*)"/i);
-      
-      if (surnameKeywordMatch) extracted.surname = surnameKeywordMatch[1];
-      if (givenKeywordMatch) extracted.givenNames = givenKeywordMatch[1];
-      
-      // If we still don't have surname/given, try to parse a full name
-      if (!extracted.surname && !extracted.givenNames) {
-        const namePatterns = [
-          /"fullName"\s*:\s*"([^"]*)"/i,
-          /"name"\s*:\s*"([^"]*)"/i,
-          /([A-Z]{2,}(?:\s+[A-Z]{2,})+)/ // All caps words
-        ];
-        
-        for (const pattern of namePatterns) {
-          const nameMatch = cleaned.match(pattern);
-          if (nameMatch && nameMatch[1]) {
-            const fullName = nameMatch[1].trim();
-            // Try to split into surname and given names (assuming surname is last)
-            const nameParts = fullName.split(' ');
-            if (nameParts.length > 1) {
-              extracted.givenNames = nameParts.slice(0, -1).join(' ');
-              extracted.surname = nameParts[nameParts.length - 1];
-            } else {
-              extracted.surname = fullName;
-            }
-            extracted.fullName = fullName; // Store the original full name
-            break;
-          }
-        }
-      }
-    }
-    
-    // If we have surname and given names but no fullName, construct it
-    if (!extracted.fullName && extracted.surname && extracted.givenNames) {
-      extracted.fullName = `${extracted.givenNames} ${extracted.surname}`.trim();
-    } else if (!extracted.fullName && extracted.surname) {
-      extracted.fullName = extracted.surname;
-    } else if (!extracted.fullName && extracted.givenNames) {
-      extracted.fullName = extracted.givenNames;
-    }
-    
-    if (!extracted.sex) {
-      const sexMatch = cleaned.match(/"sex"\s*:\s*"([^"]*)"/i) || 
-                       cleaned.match(/\b(MALE|FEMALE)\b/i);
-      if (sexMatch) extracted.sex = sexMatch[1] || sexMatch[0];
-    }
-    
-    if (!extracted.nationality) {
-      const nationalityMatch = cleaned.match(/"nationality"\s*:\s*"([^"]*)"/i) ||
-                               cleaned.match(/\b(KEN|KENYA|KENYAN)\b/i);
-      if (nationalityMatch) extracted.nationality = nationalityMatch[1] || nationalityMatch[0];
-    }
-    
-    // Convert date format if needed (from YYYY-MM-DD to DD/MM/YYYY)
-    if (extracted.dateOfBirth && extracted.dateOfBirth.includes('-')) {
-      const parts = extracted.dateOfBirth.split('-');
-      if (parts.length === 3) {
-        // Assuming YYYY-MM-DD format
-        extracted.dateOfBirth = `${parts[2]}/${parts[1]}/${parts[0]}`;
-      }
-    }
-    
-    console.log('Extracted ID Info (detailed):', extracted);
-    return extracted;
+    console.log('Extracted ID Info:', result);
+    return result;
   } catch (error) {
     console.error('Error in extractIDInfo:', error);
-    return { 
-      nationalId: null, 
-      fullName: null, 
-      dateOfBirth: null,
-      surname: null,
-      givenNames: null,
-      sex: null,
-      nationality: null,
-      placeOfBirth: null,
-      dateOfExpiry: null,
-      placeOfIssue: null,
-      cardSerialNumber: null
-    };
+    return { nationalId: null, fullName: null, dateOfBirth: null };
   }
 }
 
@@ -369,33 +246,18 @@ function isValidAge(dateOfBirthStr) {
   try {
     if (!dateOfBirthStr) return false;
     
-    let parts;
-    if (dateOfBirthStr.includes('-')) {
-      parts = dateOfBirthStr.split('-');
-    } else if (dateOfBirthStr.includes('/')) {
-      parts = dateOfBirthStr.split('/');
-    } else {
-      return false;
-    }
-    
+    const parts = dateOfBirthStr.split(/[/-]/);
     if (parts.length !== 3) return false;
     
-    let year, month, day;
+    let year = parseInt(parts[2]);
+    if (isNaN(year)) return false;
     
-    // Check format (YYYY-MM-DD or DD/MM/YYYY)
-    if (dateOfBirthStr.includes('-')) {
-      // YYYY-MM-DD format
-      year = parseInt(parts[0]);
-      month = parseInt(parts[1]) - 1;
-      day = parseInt(parts[2]);
-    } else {
-      // DD/MM/YYYY format
-      day = parseInt(parts[0]);
-      month = parseInt(parts[1]) - 1;
-      year = parseInt(parts[2]);
-    }
+    if (year < 100) year += 2000;
     
-    if (isNaN(year) || isNaN(month) || isNaN(day)) return false;
+    const month = parseInt(parts[1]) - 1;
+    const day = parseInt(parts[0]);
+    
+    if (isNaN(month) || isNaN(day)) return false;
     
     const dob = new Date(year, month, day);
     if (isNaN(dob.getTime())) return false;
@@ -416,61 +278,9 @@ function isValidAge(dateOfBirthStr) {
   }
 }
 
-// Helper: Generate a secure random token
-const generateToken = () => {
-  return crypto.randomBytes(32).toString('hex');
-};
-
-// Helper: Verify reCAPTCHA v2 token
-const verifyRecaptcha = async (token) => {
-  try {
-    const secret = process.env.RECAPTCHA_SECRET_KEY;
-    if (!secret) {
-      console.error('RECAPTCHA_SECRET_KEY not set in environment variables');
-      return false;
-    }
-
-    console.log('Verifying reCAPTCHA v2 token...');
-    
-    const url = `https://www.google.com/recaptcha/api/siteverify`;
-    const params = new URLSearchParams();
-    params.append('secret', secret);
-    params.append('response', token);
-
-    const { data } = await axios.post(url, params, {
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded'
-      }
-    });
-
-    console.log('reCAPTCHA v2 verification response:', data);
-
-    if (data.success) {
-      const allowedHostnames = ['localhost', '127.0.0.1', 'yourdomain.com'];
-      if (data.hostname && !allowedHostnames.includes(data.hostname)) {
-        console.error('reCAPTCHA hostname mismatch:', data.hostname);
-        return false;
-      }
-      return true;
-    }
-
-    if (data['error-codes']) {
-      console.error('reCAPTCHA v2 error codes:', data['error-codes']);
-    }
-
-    return false;
-  } catch (error) {
-    console.error('reCAPTCHA v2 verification error:', error.message);
-    if (error.response) {
-      console.error('reCAPTCHA API response:', error.response.data);
-    }
-    return false;
-  }
-};
-
 // ========== ADMIN FUNCTIONS ==========
 
-// @desc    Register new voter (Admin only) - WITH SIGNATURE ONLY
+// @desc    Register new voter (Admin only) with signature
 // @route   POST /api/v1/voters/register
 // @access  Private (Admin)
 const registerVoter = async (req, res, next) => {
@@ -482,7 +292,7 @@ const registerVoter = async (req, res, next) => {
       phoneNumber, 
       constituency, 
       ward,
-      signature
+      signature  // New signature field
     } = req.body;
 
     // Validate all required fields
@@ -493,7 +303,7 @@ const registerVoter = async (req, res, next) => {
       });
     }
 
-    // Validate signature (required)
+    // Validate signature
     const signatureValidation = validateSignature(signature);
     if (!signatureValidation.valid) {
       return res.status(400).json({
@@ -539,7 +349,7 @@ const registerVoter = async (req, res, next) => {
       });
     }
 
-    // Create voter with signature only (no WebAuthn)
+    // Create voter with signature
     const voterData = {
       nationalId,
       fullName,
@@ -548,17 +358,17 @@ const registerVoter = async (req, res, next) => {
       constituency,
       ward,
       county: 'Kirinyaga',
-      signature
+      signature  // Add the signature
     };
 
     // Create voter
     const voter = await Voter.create(voterData);
 
-    // Send registration email with voting number
+    // Send registration email
     await sendRegistrationEmail(voter, voter.votingNumber);
 
     // Log the action
-    await auditLogger.log(req.admin?._id || req.user?._id, 'CREATE', 'Voter', voter._id, {
+    await auditLogger.log(req.admin._id, 'CREATE', 'Voter', voter._id, {
       nationalId: voter.nationalId,
       constituency: voter.constituency,
       ward: voter.ward,
@@ -614,18 +424,15 @@ const getVoterCount = async (req, res, next) => {
 const getPendingVoters = async (req, res, next) => {
   try {
     const pendingVoters = await Voter.find({ hasVoted: false })
-      .select('votingNumber fullName constituency ward registrationDate createdAt signature')
-      .sort({ registrationDate: -1, createdAt: -1 });
+      .select('votingNumber fullName constituency ward signature hasVoted')
+      .sort({ registrationDate: -1 });
     
     const count = pendingVoters.length;
     
     res.status(200).json({
       success: true,
       count,
-      data: pendingVoters.map(v => ({
-        ...v.toObject(),
-        hasSignature: !!v.signature
-      }))
+      data: pendingVoters
     });
   } catch (error) {
     next(error);
@@ -638,18 +445,51 @@ const getPendingVoters = async (req, res, next) => {
 const getVotedVoters = async (req, res, next) => {
   try {
     const votedVoters = await Voter.find({ hasVoted: true })
-      .select('votingNumber fullName constituency ward registrationDate createdAt votedAt signature')
-      .sort({ votedAt: -1, registrationDate: -1 });
+      .select('votingNumber fullName constituency ward signature hasVoted votedAt')
+      .sort({ registrationDate: -1 });
     
     const count = votedVoters.length;
     
     res.status(200).json({
       success: true,
       count,
-      data: votedVoters.map(v => ({
-        ...v.toObject(),
-        hasSignature: !!v.signature
-      }))
+      data: votedVoters
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// @desc    Get voter's signature
+// @route   GET /api/v1/voters/:voterId/signature
+// @access  Private (Admin)
+const getVoterSignature = async (req, res, next) => {
+  try {
+    const { voterId } = req.params;
+    
+    const voter = await Voter.findById(voterId).select('fullName votingNumber signature');
+    
+    if (!voter) {
+      return res.status(404).json({
+        success: false,
+        error: 'Voter not found'
+      });
+    }
+    
+    if (!voter.signature) {
+      return res.status(404).json({
+        success: false,
+        error: 'No signature found for this voter'
+      });
+    }
+    
+    res.status(200).json({
+      success: true,
+      data: {
+        fullName: voter.fullName,
+        votingNumber: voter.votingNumber,
+        signature: voter.signature
+      }
     });
   } catch (error) {
     next(error);
@@ -680,7 +520,7 @@ const getWardsByConstituency = async (req, res, next) => {
   }
 };
 
-// @desc    Get voter statistics including signature stats
+// @desc    Get voter statistics
 // @route   GET /api/v1/voters/statistics
 // @access  Private (Admin)
 const getVoterStatistics = async (req, res, next) => {
@@ -688,9 +528,7 @@ const getVoterStatistics = async (req, res, next) => {
     const totalVoters = await Voter.countDocuments();
     const votedCount = await Voter.countDocuments({ hasVoted: true });
     const pendingCount = totalVoters - votedCount;
-    
-    // Get signature stats
-    const signatureCount = await Voter.countDocuments({ signature: { $exists: true, $ne: null } });
+    const withSignatureCount = await Voter.countDocuments({ signature: { $exists: true, $ne: null } });
     
     // Count by constituency
     const byConstituency = await Voter.aggregate([
@@ -699,19 +537,11 @@ const getVoterStatistics = async (req, res, next) => {
           _id: '$constituency',
           total: { $sum: 1 },
           voted: { $sum: { $cond: [{ $eq: ['$hasVoted', true] }, 1, 0] } },
-          pending: { $sum: { $cond: [{ $eq: ['$hasVoted', false] }, 1, 0] } }
+          pending: { $sum: { $cond: [{ $eq: ['$hasVoted', false] }, 1, 0] } },
+          withSignature: { $sum: { $cond: [{ $and: [{ $ne: ['$signature', null] }, { $ne: ['$signature', ''] }] }, 1, 0] } }
         }
       },
-      {
-        $project: {
-          constituency: '$_id',
-          total: 1,
-          voted: 1,
-          pending: 1,
-          _id: 0
-        }
-      },
-      { $sort: { constituency: 1 } }
+      { $sort: { _id: 1 } }
     ]);
     
     // Count by ward
@@ -724,26 +554,8 @@ const getVoterStatistics = async (req, res, next) => {
           pending: { $sum: { $cond: [{ $eq: ['$hasVoted', false] }, 1, 0] } }
         }
       },
-      {
-        $project: {
-          constituency: '$_id.constituency',
-          ward: '$_id.ward',
-          total: 1,
-          voted: 1,
-          pending: 1,
-          _id: 0
-        }
-      },
-      { $sort: { constituency: 1, ward: 1 } }
+      { $sort: { '_id.constituency': 1, '_id.ward': 1 } }
     ]);
-    
-    // Get recent registrations (last 7 days)
-    const sevenDaysAgo = new Date();
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-    
-    const recentRegistrations = await Voter.countDocuments({
-      createdAt: { $gte: sevenDaysAgo }
-    });
     
     res.status(200).json({
       success: true,
@@ -752,10 +564,9 @@ const getVoterStatistics = async (req, res, next) => {
           total: totalVoters,
           voted: votedCount,
           pending: pendingCount,
+          withSignature: withSignatureCount,
           percentageVoted: totalVoters > 0 ? ((votedCount / totalVoters) * 100).toFixed(2) : 0,
-          recentRegistrations,
-          signatureCollected: signatureCount,
-          signaturePercentage: totalVoters > 0 ? ((signatureCount / totalVoters) * 100).toFixed(2) : 0
+          percentageWithSignature: totalVoters > 0 ? ((withSignatureCount / totalVoters) * 100).toFixed(2) : 0
         },
         byConstituency,
         byWard
@@ -774,17 +585,14 @@ const getRecentRegistrations = async (req, res, next) => {
     const limit = parseInt(req.query.limit) || 10;
     
     const recentVoters = await Voter.find()
-      .select('fullName votingNumber constituency registrationDate createdAt signature')
-      .sort({ registrationDate: -1, createdAt: -1 })
+      .select('fullName votingNumber constituency registrationDate hasVoted signature')
+      .sort({ registrationDate: -1 })
       .limit(limit);
     
     res.status(200).json({
       success: true,
       count: recentVoters.length,
-      data: recentVoters.map(v => ({
-        ...v.toObject(),
-        hasSignature: !!v.signature
-      })),
+      data: recentVoters,
       lastUpdated: new Date()
     });
   } catch (error) {
@@ -804,7 +612,7 @@ const getTodaysRegistrationsCount = async (req, res, next) => {
     tomorrow.setDate(tomorrow.getDate() + 1);
     
     const count = await Voter.countDocuments({
-      createdAt: {
+      registrationDate: {
         $gte: today,
         $lt: tomorrow
       }
@@ -847,10 +655,7 @@ const checkEmail = async (req, res, next) => {
   try {
     const { email } = req.params;
     
-    // Decode email if it contains special characters
-    const decodedEmail = decodeURIComponent(email);
-    
-    const existingVoter = await Voter.findOne({ email: decodedEmail });
+    const existingVoter = await Voter.findOne({ email });
     
     res.status(200).json({
       success: true,
@@ -875,6 +680,7 @@ const updateTempVoterName = async (req, res, next) => {
   try {
     const { tempToken, fullName } = req.body;
 
+    // Validate input
     if (!tempToken || !fullName) {
       return res.status(400).json({
         success: false,
@@ -882,42 +688,106 @@ const updateTempVoterName = async (req, res, next) => {
       });
     }
 
-    if (fullName.split(/\s+/).length < 2) {
+    // Validate name format (at least 2 words, only letters and spaces)
+    const nameParts = fullName.trim().split(/\s+/);
+    if (nameParts.length < 2) {
       return res.status(400).json({
         success: false,
-        error: 'Full name must include at least two words'
+        error: 'Full name must include at least first name and surname'
       });
     }
 
-    const tempData = await TempVoterData.findOne({ token: tempToken });
-    if (!tempData) {
+    // Validate each part contains only letters and common name characters
+    const nameRegex = /^[A-Za-z\s'-]+$/;
+    if (!nameRegex.test(fullName)) {
       return res.status(400).json({
         success: false,
-        error: 'Invalid or expired token'
+        error: 'Name can only contain letters, spaces, hyphens, and apostrophes'
       });
     }
+
+    // Find temp data by token
+    const tempData = await TempVoterData.findOne({ token: tempToken });
+    
+    if (!tempData) {
+      return res.status(404).json({
+        success: false,
+        error: 'Invalid or expired token. Please restart registration.'
+      });
+    }
+
+    // Check if token has expired (optional, since MongoDB TTL will auto-delete)
+    const tokenAge = Date.now() - tempData.createdAt.getTime();
+    const oneHour = 60 * 60 * 1000; // 1 hour in milliseconds
+    
+    if (tokenAge > oneHour) {
+      // Optionally delete expired token
+      await tempData.deleteOne();
+      return res.status(410).json({
+        success: false,
+        error: 'Token has expired. Please restart registration.'
+      });
+    }
+
+    // Store the original name for logging
+    const oldName = tempData.fullName;
 
     // Update the fullName in tempData
     tempData.fullName = fullName.trim();
+    
+    // Optional: Also update surname/givenNames if you want to keep them in sync
+    // This helps if you need to use them separately later
+    const namePartsArray = fullName.trim().split(/\s+/);
+    if (namePartsArray.length >= 2) {
+      // Assume last part is surname, everything else is given names
+      tempData.surname = namePartsArray.pop(); // Last word as surname
+      tempData.givenNames = namePartsArray.join(' '); // Remaining as given names
+    }
+
     await tempData.save();
 
-    console.log('✅ Updated tempData name to:', fullName);
+    console.log('✅ Updated tempData:', {
+      token: tempToken,
+      oldName,
+      newName: tempData.fullName,
+      surname: tempData.surname,
+      givenNames: tempData.givenNames
+    });
+
+    // Log the update
+    await auditLogger.log(null, 'UPDATE_TEMP_NAME', 'TempVoterData', tempData._id, {
+      nationalId: tempData.nationalId,
+      oldName,
+      newName: tempData.fullName
+    });
 
     res.status(200).json({
       success: true,
-      message: 'Name updated successfully'
+      message: 'Name updated successfully',
+      data: {
+        fullName: tempData.fullName,
+        surname: tempData.surname,
+        givenNames: tempData.givenNames
+      }
     });
   } catch (error) {
     console.error('UPDATE NAME ERROR:', error);
+    
+    // Handle MongoDB errors
+    if (error.name === 'CastError') {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid token format'
+      });
+    }
+    
     next(error);
   }
 };
 
-/**
- * @desc    Upload ID images, perform OCR & quality checks
- * @route   POST /api/v1/voters/self/upload-id
- * @access  Public
- */
+// @desc    Upload ID images, perform OCR & quality checks
+// @route   POST /api/v1/voters/self/upload-id
+// @access  Public
 const uploadIDForSelfRegistration = async (req, res, next) => {
   try {
     console.log('Upload request received');
@@ -994,9 +864,9 @@ const uploadIDForSelfRegistration = async (req, res, next) => {
     console.log('Raw OCR Text:', combinedText);
     
     const extracted = extractIDInfo(combinedText);
-    console.log('Extracted data (detailed):', extracted);
+    console.log('Extracted data:', extracted);
 
-    // Validate extracted essential fields
+    // Validate extracted essential fields - be more lenient
     if (!extracted.nationalId) {
       return res.status(400).json({
         success: false,
@@ -1011,15 +881,7 @@ const uploadIDForSelfRegistration = async (req, res, next) => {
       });
     }
 
-    // Validate national ID format (Kenyan ID can be 7-10 digits)
-    if (!/^\d{7,10}$/.test(extracted.nationalId)) {
-      return res.status(400).json({
-        success: false,
-        error: 'Extracted National ID has invalid format. Must be 7-10 digits.'
-      });
-    }
-
-    // Age validation using DOB
+    // Age validation using DOB - make DOB optional for now if extraction fails
     if (extracted.dateOfBirth) {
       if (!isValidAge(extracted.dateOfBirth)) {
         return res.status(400).json({
@@ -1029,6 +891,7 @@ const uploadIDForSelfRegistration = async (req, res, next) => {
       }
     } else {
       console.log('Date of birth not extracted, continuing without age validation');
+      // Set a placeholder date - user can enter manually in step 3
       extracted.dateOfBirth = 'Not extracted - will enter manually';
     }
 
@@ -1121,24 +984,24 @@ const uploadIDForSelfRegistration = async (req, res, next) => {
 // @access  Public
 const selfRegisterVoter = async (req, res, next) => {
   try {
-    const { tempToken, email, phoneNumber, constituency, ward, declaration, recaptchaToken, signature } = req.body;
+    const { 
+      tempToken,
+      email, 
+      phoneNumber, 
+      constituency, 
+      ward,
+      signature  // Add signature for self-registration
+    } = req.body;
 
     // Validate required fields
-    if (!tempToken || !email || !phoneNumber || !constituency || !ward || declaration === undefined) {
+    if (!tempToken || !email || !phoneNumber || !constituency || !ward) {
       return res.status(400).json({ 
         success: false, 
         error: 'All fields are required' 
       });
     }
 
-    // Validate signature for self-registration
-    if (!signature) {
-      return res.status(400).json({
-        success: false,
-        error: 'Signature is required'
-      });
-    }
-
+    // Validate signature
     const signatureValidation = validateSignature(signature);
     if (!signatureValidation.valid) {
       return res.status(400).json({
@@ -1147,28 +1010,25 @@ const selfRegisterVoter = async (req, res, next) => {
       });
     }
 
-    // Verify reCAPTCHA v2 token
-    if (!recaptchaToken) {
-      return res.status(400).json({
-        success: false,
-        error: 'reCAPTCHA token is required'
-      });
-    }
-
-    const isRecaptchaValid = await verifyRecaptcha(recaptchaToken);
-    if (!isRecaptchaValid) {
-      return res.status(400).json({
-        success: false,
-        error: 'reCAPTCHA verification failed. Please try again.'
-      });
-    }
-
-    // Retrieve temp data
+    // Find temp data by token
     const tempData = await TempVoterData.findOne({ token: tempToken });
+    
     if (!tempData) {
-      return res.status(400).json({
+      return res.status(404).json({
         success: false,
         error: 'Invalid or expired token. Please restart registration.'
+      });
+    }
+
+    // Check if token has expired
+    const tokenAge = Date.now() - tempData.createdAt.getTime();
+    const oneHour = 60 * 60 * 1000;
+    
+    if (tokenAge > oneHour) {
+      await tempData.deleteOne();
+      return res.status(410).json({
+        success: false,
+        error: 'Token has expired. Please restart registration.'
       });
     }
 
@@ -1188,12 +1048,14 @@ const selfRegisterVoter = async (req, res, next) => {
       });
     }
 
-    // Check for duplicates (email and nationalId)
+    // Check for duplicates
     const existingVoter = await Voter.findOne({
       $or: [{ nationalId: tempData.nationalId }, { email }]
     });
     
     if (existingVoter) {
+      // Clean up temp data since it's no longer needed
+      await tempData.deleteOne();
       return res.status(400).json({
         success: false,
         error: 'Voter with this National ID or Email already exists'
@@ -1209,22 +1071,28 @@ const selfRegisterVoter = async (req, res, next) => {
       });
     }
 
-    // ===== CRITICAL: Use the fullName from tempData as is =====
+    // Use the updated name from tempData
     const fullName = tempData.fullName;
 
     console.log('✅ Registering voter with name:', fullName);
 
-    // Create voter with signature only (no WebAuthn)
+    // Create voter with data from temp record and signature
     const voter = await Voter.create({
       nationalId: tempData.nationalId,
-      fullName: fullName,
+      fullName: fullName, // This is the user-edited name
       email,
       phoneNumber,
       constituency,
       ward,
       county: 'Kirinyaga',
-      signature
+      signature  // Add signature
     });
+
+    // Store additional info from tempData if needed
+    if (tempData.dateOfBirth && tempData.dateOfBirth !== 'Not extracted - will enter manually') {
+      // You might want to store DOB in a separate field if you add it to the model
+      console.log('Date of birth from ID:', tempData.dateOfBirth);
+    }
 
     // Delete temp data after successful registration
     await tempData.deleteOne();
@@ -1232,12 +1100,13 @@ const selfRegisterVoter = async (req, res, next) => {
     // Send email with voting number
     await sendRegistrationEmail(voter, voter.votingNumber);
 
-    // Log self-registration
+    // Log self-registration (adminId = null)
     await auditLogger.log(null, 'SELF_REGISTER', 'Voter', voter._id, {
       nationalId: voter.nationalId,
       constituency: voter.constituency,
       ward: voter.ward,
-      hasSignature: true
+      hasSignature: true,
+      nameEdited: fullName !== tempData.fullName // Log if name was edited
     });
 
     res.status(201).json({
@@ -1253,6 +1122,16 @@ const selfRegisterVoter = async (req, res, next) => {
     });
   } catch (error) {
     console.error('SELF REGISTER ERROR:', error);
+    
+    // Check for duplicate key error
+    if (error.code === 11000) {
+      const field = Object.keys(error.keyPattern)[0];
+      return res.status(400).json({
+        success: false,
+        error: `Duplicate value for ${field}. Please use unique values.`
+      });
+    }
+    
     next(error);
   }
 };
@@ -1270,11 +1149,12 @@ module.exports = {
   getTodaysRegistrationsCount,
   checkNationalId,
   checkEmail,
+  getVoterSignature,  // New function
   
   // Self-registration functions
   uploadIDForSelfRegistration,
   selfRegisterVoter,
-  updateTempVoterName,
+  updateTempVoterName, // ADDED: Export the update function
   
   // Multer instance for routes
   upload
