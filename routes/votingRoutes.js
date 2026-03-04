@@ -1,4 +1,3 @@
-// routes/votingRoutes.js
 const express = require('express');
 const router = express.Router();
 const { validateVote } = require('../middlewares/validationMiddleware');
@@ -6,21 +5,8 @@ const rateLimit = require('express-rate-limit');
 
 const {
   checkEligibility,
-  submitVote,
-  getVoterSignatureForVerification
+  submitVote
 } = require('../controllers/votingController');
-
-// Rate limiting for signature verification to prevent abuse
-const signatureLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 5, // limit each IP to 5 requests per windowMs
-  message: {
-    success: false,
-    error: 'Too many signature verification attempts. Please try again after 15 minutes.'
-  },
-  standardHeaders: true,
-  legacyHeaders: false
-});
 
 // Rate limiting for vote submission (stricter limits)
 const voteSubmissionLimiter = rateLimit({
@@ -44,15 +30,8 @@ const voteSubmissionLimiter = rateLimit({
 router.get('/eligibility/:votingNumber', checkEligibility);
 
 /**
- * @route   GET /api/v1/voting/signature/:votingNumber
- * @desc    Get voter's signature for verification (with rate limiting)
- * @access  Public (rate limited)
- */
-router.get('/signature/:votingNumber', signatureLimiter, getVoterSignatureForVerification);
-
-/**
  * @route   POST /api/v1/voting/submit
- * @desc    Submit vote with signature verification
+ * @desc    Submit vote
  * @access  Public (rate limited)
  */
 router.post('/submit', voteSubmissionLimiter, validateVote, submitVote);
