@@ -22,6 +22,7 @@ const votingRoutes = require('./routes/votingRoutes');
 const resultsRoutes = require('./routes/resultRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 const authRoutes = require('./routes/authRoutes');
+
 // ===== ADD FEEDBACK ROUTES =====
 const feedbackRoutes = require('./routes/feedbackRoutes');
 const adminFeedbackRoutes = require('./routes/adminFeedbackRoutes');
@@ -64,8 +65,8 @@ app.use(helmet({
   crossOriginResourcePolicy: { policy: "cross-origin" }
 }));
 app.use(cors());
-//app.use(xss());
-//app.use(mongoSanitize());
+// app.use(xss());
+// app.use(mongoSanitize());
 
 app.set('trust proxy', 1);
 
@@ -83,7 +84,7 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 console.log("📥 Body parsers enabled");
 
-// Serve static files (for frontend)
+// Serve static files
 app.use(express.static(path.join(__dirname, 'public')));
 console.log("📁 Static files served from /public");
 
@@ -93,7 +94,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// Make io accessible to router
+// Make io accessible to routes
 app.use((req, res, next) => {
   req.io = io;
   next();
@@ -107,11 +108,12 @@ app.use('/api/v1/candidates', candidateRoutes);
 app.use('/api/v1/voting', votingRoutes);
 app.use('/api/v1/results', resultsRoutes);
 app.use('/api/v1/admin', adminRoutes);
-// ===== ADD FEEDBACK ROUTES =====
-app.use('/api/v1/admin/feedback', adminFeedbackRoutes); 
+
+// Feedback routes
+app.use('/api/v1/admin/feedback', adminFeedbackRoutes);
 console.log("✅ Admin feedback routes registered successfully");
-// Admin feedback routes
-app.use('/api/v1/feedback', feedbackRoutes); 
+
+app.use('/api/v1/feedback', feedbackRoutes);
 console.log("✅ Feedback routes registered successfully");
 
 console.log("✅ All routes registered successfully");
@@ -119,6 +121,12 @@ console.log("✅ All routes registered successfully");
 // Serve feedback form directly
 app.get('/feedback', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'feedback.html'));
+});
+
+// ✅ NEW: Ping endpoint (for uptime monitoring)
+app.get('/ping', (req, res) => {
+  console.log("🏓 Ping endpoint hit");
+  res.send("OK");
 });
 
 // Health check endpoint
@@ -159,6 +167,7 @@ server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`🌍 Mode: ${process.env.NODE_ENV}`);
   console.log(`📝 Feedback form: http://localhost:${PORT}/feedback`);
+  console.log(`🏓 Ping URL: http://localhost:${PORT}/ping`);
   console.log("======================================");
 });
 
